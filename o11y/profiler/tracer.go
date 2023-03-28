@@ -16,7 +16,6 @@ import (
 // Sink describes a profiler
 type Sink interface {
 	GetSinkName() string
-	Start()
 	Stop()
 }
 

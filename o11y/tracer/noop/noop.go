@@ -11,22 +11,18 @@ import (
 	"github.com/DataDog/chaos-controller/o11y/tracer/types"
 )
 
-// Sink describes a no-op sink
+// Sink describes a no-op tracer sink
 type Sink struct{}
 
 // New NOOP Sink
 func New() *Sink {
+	fmt.Println("NOOP: noop Sink Started")
 	return &Sink{}
-}
-
-// Start tracer
-func (n *Sink) Start() {
-	fmt.Println("NOOP: Empty Sink Started")
 }
 
 // Stop tracer
 func (n *Sink) Stop() {
-	fmt.Println("NOOP: Empty Sink Stopped")
+	fmt.Println("NOOP: noop Sink Stopped")
 }
 
 // GetSinkName returns the name of the sink

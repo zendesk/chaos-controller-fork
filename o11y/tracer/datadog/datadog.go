@@ -11,17 +11,13 @@ import (
 	"github.com/DataDog/chaos-controller/o11y/tracer/types"
 )
 
-// Sink describes a datadog tracer
+// Sink describes a datadog tracer sink
 type Sink struct{}
 
-// New datadog sink
+// New initiated datadog sink
 func New() *Sink {
-	return &Sink{}
-}
-
-// Start returns nil
-func (d *Sink) Start() {
 	tracer.Start()
+	return &Sink{}
 }
 
 // Stop returns nil

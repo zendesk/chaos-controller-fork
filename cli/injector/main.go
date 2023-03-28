@@ -25,6 +25,8 @@ import (
 	"github.com/DataDog/chaos-controller/network"
 	"github.com/DataDog/chaos-controller/o11y/metrics"
 	metricstypes "github.com/DataDog/chaos-controller/o11y/metrics/types"
+	"github.com/DataDog/chaos-controller/o11y/profiler"
+	profilertypes "github.com/DataDog/chaos-controller/o11y/profiler/types"
 	"github.com/DataDog/chaos-controller/o11y/tracer"
 	tracertypes "github.com/DataDog/chaos-controller/o11y/tracer/types"
 	chaostypes "github.com/DataDog/chaos-controller/types"
@@ -58,6 +60,7 @@ var (
 	dryRun               bool
 	ms                   metrics.Sink
 	ts                   tracer.Sink
+	ps                   profiler.Sink
 	sink                 string
 	level                string
 	rawTargetContainers  []string // contains name:id containers
@@ -120,6 +123,7 @@ func init() {
 	cobra.OnInitialize(initConfig)
 	cobra.OnInitialize(initExitSignalsHandler)
 	cobra.OnInitialize(initTracerSink)
+	cobra.OnInitialize(initProfilerSink)
 }
 
 func main() {
@@ -184,8 +188,18 @@ func initTracerSink() {
 
 		ts, _ = tracer.GetSink(tracertypes.SinkDriverNoop)
 	}
+}
 
-	ts.Start()
+func initProfilerSink() {
+	var err error
+
+	ps, err = profiler.GetSink(profilertypes.SinkDriver("noop")) //FIXME: add configmap parameter
+
+	if err != nil {
+		log.Errorw("error while creating profiler sink, switching to noop sink", "error", err)
+
+		ps, _ = profiler.GetSink(profilertypes.SinkDriverNoop)
+	}
 }
 
 func initManagers(pid uint32) (netns.Manager, cgroup.Manager, error) {

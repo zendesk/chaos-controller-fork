@@ -25,8 +25,6 @@ import (
 	"os"
 	"time"
 
-	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
-
 	chaosv1beta1 "github.com/DataDog/chaos-controller/api/v1beta1"
 	"github.com/DataDog/chaos-controller/cloudservice"
 	cloudtypes "github.com/DataDog/chaos-controller/cloudservice/types"
@@ -37,6 +35,8 @@ import (
 	"github.com/DataDog/chaos-controller/log"
 	"github.com/DataDog/chaos-controller/o11y/metrics"
 	metricstypes "github.com/DataDog/chaos-controller/o11y/metrics/types"
+	"github.com/DataDog/chaos-controller/o11y/profiler"
+	profilertypes "github.com/DataDog/chaos-controller/o11y/profiler/types"
 	"github.com/DataDog/chaos-controller/o11y/tracer"
 	tracertypes "github.com/DataDog/chaos-controller/o11y/tracer/types"
 	"github.com/DataDog/chaos-controller/targetselector"
@@ -365,23 +365,12 @@ func main() {
 
 	// tracer sink
 	tracer, err := tracer.GetSink(tracertypes.SinkDriver("noop")) //FIXME: configmap parameter
-	tracer.Start()
 	defer tracer.Stop()
 
 	// profiler sink
-	err = profiler.Start(
-		profiler.WithProfileTypes(
-			profiler.CPUProfile,
-			profiler.HeapProfile,
+	profiler, err := profiler.GetSink(profilertypes.SinkDriver("noop")) //FIXME: confimap parameter
+	defer profiler.Stop()
 
-			// The profiles below are disabled by
-			// default to keep overhead low, but
-			// can be enabled as needed.
-			// profiler.BlockProfile,
-			// profiler.MutexProfile,
-			// profiler.GoroutineProfile,
-		),
-	)
 	if err != nil {
 		logger.Fatal(err)
 	}

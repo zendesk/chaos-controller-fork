@@ -7,27 +7,29 @@ package datadog
 
 import (
 	"github.com/DataDog/chaos-controller/o11y/profiler/types"
+	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 )
 
 // Sink describes a datadog profiler
 type Sink struct{}
 
-// New datadog sink
+// New datadog profiler sink
 func New() *Sink {
+	profiler.WithProfileTypes(
+		profiler.CPUProfile,
+		profiler.HeapProfile,
+		profiler.BlockProfile,
+		profiler.MutexProfile,
+		profiler.GoroutineProfile,
+	)
 	return &Sink{}
 }
 
-// Start returns nil
-func (d *Sink) Start() {
-	//FIXME
-}
-
-// Stop returns nil
-func (d *Sink) Stop() {
-	//FIXME
+func (*Sink) Stop() {
+	profiler.Stop()
 }
 
 // GetSinkName returns the name of the sink
-func (d *Sink) GetSinkName() string {
+func (*Sink) GetSinkName() string {
 	return string(types.SinkDriverDatadog)
 }

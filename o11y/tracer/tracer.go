@@ -16,7 +16,6 @@ import (
 // Sink describes a tracer
 type Sink interface {
 	GetSinkName() string
-	Start()
 	Stop()
 }
 

@@ -11,25 +11,21 @@ import (
 	"github.com/DataDog/chaos-controller/o11y/profiler/types"
 )
 
-// Sink describes a no-op sink
+// Sink describes a no-op profiler sink
 type Sink struct{}
 
 // New NOOP Sink
 func New() *Sink {
+	fmt.Println("NOOP: profiler noop Sink Started")
 	return &Sink{}
 }
 
-// Start profiler
-func (n *Sink) Start() {
-	fmt.Println("NOOP: Empty Sink Started")
-}
-
 // Stop profiler
-func (n *Sink) Stop() {
-	fmt.Println("NOOP: Empty Sink Stopped")
+func (*Sink) Stop() {
+	fmt.Println("NOOP: profiler noop Sink Stopped")
 }
 
 // GetSinkName returns the name of the sink
-func (n *Sink) GetSinkName() string {
+func (*Sink) GetSinkName() string {
 	return string(types.SinkDriverNoop)
 }
