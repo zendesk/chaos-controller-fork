@@ -6,12 +6,10 @@
 package datadog
 
 import (
-	"gopkg.in/DataDog/dd-trace-go.v1/ddtrace/tracer"
-
-	"github.com/DataDog/chaos-controller/o11y/tracer/types"
+	"github.com/DataDog/chaos-controller/o11y/profiler/types"
 )
 
-// Sink describes a datadog tracer
+// Sink describes a datadog profiler
 type Sink struct{}
 
 // New datadog sink
@@ -21,12 +19,12 @@ func New() *Sink {
 
 // Start returns nil
 func (d *Sink) Start() {
-	tracer.Start()
+	//FIXME
 }
 
 // Stop returns nil
 func (d *Sink) Stop() {
-	tracer.Stop()
+	//FIXME
 }
 
 // GetSinkName returns the name of the sink
