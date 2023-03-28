@@ -8,9 +8,9 @@ package tracer
 import (
 	"fmt"
 
-	"github.com/DataDog/chaos-controller/tracer/datadog"
-	"github.com/DataDog/chaos-controller/tracer/noop"
-	"github.com/DataDog/chaos-controller/tracer/types"
+	"github.com/DataDog/chaos-controller/o11y/tracer/datadog"
+	"github.com/DataDog/chaos-controller/o11y/tracer/noop"
+	"github.com/DataDog/chaos-controller/o11y/tracer/types"
 )
 
 // Sink describes a tracer

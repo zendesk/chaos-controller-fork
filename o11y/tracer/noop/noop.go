@@ -8,7 +8,7 @@ package noop
 import (
 	"fmt"
 
-	"github.com/DataDog/chaos-controller/tracer/types"
+	"github.com/DataDog/chaos-controller/o11y/tracer/types"
 )
 
 // Sink describes a no-op sink
