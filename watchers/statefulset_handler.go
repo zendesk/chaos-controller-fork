@@ -1,19 +1,21 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package watchers
 
 import (
-	context "context"
+	"context"
 	"time"
 
-	chaosv1beta1 "github.com/DataDog/chaos-controller/api/v1beta1"
+	"github.com/DataDog/chaos-controller/o11y/tags"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	chaosv1beta1 "github.com/DataDog/chaos-controller/api/v1beta1"
 )
 
 type StatefulSetHandler struct {
@@ -98,10 +100,10 @@ func (h StatefulSetHandler) FetchAssociatedDisruptionRollouts(statefulset *appsv
 	// It would be more efficient to use label selectors,
 	// however it would require a webhook to add those labels when new rollouts are created
 	disruptionRollouts := &chaosv1beta1.DisruptionRolloutList{}
-	err := h.Client.List(context.Background(), disruptionRollouts, client.MatchingFields{"targetResource": indexedValue})
 
+	err := h.Client.List(context.Background(), disruptionRollouts, client.MatchingFields{"targetResource": indexedValue})
 	if err != nil {
-		h.log.Errorw("unable to fetch DisruptionRollouts using index", "error", err, "indexedValue", indexedValue)
+		h.log.Errorw("unable to fetch DisruptionRollouts using index", tags.ErrorKey, err, tags.IndexedValueKey, indexedValue)
 		return nil, err
 	}
 
@@ -111,7 +113,7 @@ func (h StatefulSetHandler) FetchAssociatedDisruptionRollouts(statefulset *appsv
 func (h StatefulSetHandler) HasAssociatedDisruptionRollout(statefulset *appsv1.StatefulSet) (bool, error) {
 	disruptionRollouts, err := h.FetchAssociatedDisruptionRollouts(statefulset)
 	if err != nil {
-		h.log.Errorw("unable to check for associated DisruptionRollout", "StatefulSet", statefulset.Name, "error", err)
+		h.log.Errorw("unable to check for associated DisruptionRollout", tags.StatefulSetNameKey, statefulset.Name, tags.ErrorKey, err)
 		return false, err
 	}
 
@@ -131,7 +133,7 @@ func (h StatefulSetHandler) UpdateDisruptionRolloutStatus(statefulset *appsv1.St
 
 		err = h.Client.Status().Update(context.Background(), &dr)
 		if err != nil {
-			h.log.Errorw("unable to update DisruptionRollout status", "DisruptionRollout", dr.Name, "error", err)
+			h.log.Errorw("unable to update DisruptionRollout status", tags.DisruptionRolloutNameKey, dr.Name, tags.ErrorKey, err)
 			return err
 		}
 	}

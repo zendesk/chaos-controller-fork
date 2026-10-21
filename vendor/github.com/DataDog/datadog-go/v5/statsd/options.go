@@ -28,6 +28,7 @@ var (
 	defaultOriginDetection              = true
 	defaultChannelModeErrorsWhenFull    = false
 	defaultErrorHandler                 = func(error) {}
+	defaultAggregatorShardCount         = 1
 )
 
 // Options contains the configuration options for a client.
@@ -49,11 +50,13 @@ type Options struct {
 	aggregation                  bool
 	extendedAggregation          bool
 	maxBufferedSamplesPerContext int
+	aggregatorShardCount         int
 	telemetryAddr                string
 	originDetection              bool
 	containerID                  string
 	channelModeErrorsWhenFull    bool
 	errorHandler                 ErrorHandler
+	tagCardinality               *Cardinality
 }
 
 func resolveOptions(options []Option) (*Options, error) {
@@ -78,6 +81,7 @@ func resolveOptions(options []Option) (*Options, error) {
 		originDetection:              defaultOriginDetection,
 		channelModeErrorsWhenFull:    defaultChannelModeErrorsWhenFull,
 		errorHandler:                 defaultErrorHandler,
+		aggregatorShardCount:         defaultAggregatorShardCount,
 	}
 
 	for _, option := range options {
@@ -373,9 +377,10 @@ func WithTelemetryAddr(addr string) Option {
 // WithoutOriginDetection disables the client origin detection.
 // When enabled, the client tries to discover its container ID and sends it to the Agent
 // to enrich the metrics with container tags.
+// If the container id is not found and the client is running in a private cgroup namespace, the client
+// sends the base cgroup controller inode.
 // Origin detection can also be disabled by configuring the environment variabe DD_ORIGIN_DETECTION_ENABLED=false
 // The client tries to read the container ID by parsing the file /proc/self/cgroup, this is not supported on Windows.
-// The client prioritizes the value passed via DD_ENTITY_ID (if set) over the container ID.
 //
 // More on this here: https://docs.datadoghq.com/developers/dogstatsd/?tab=kubernetes#origin-detection-over-udp
 func WithoutOriginDetection() Option {
@@ -389,9 +394,9 @@ func WithoutOriginDetection() Option {
 // This feature requires Datadog Agent version >=6.35.0 && <7.0.0 or Agent versions >=7.35.0.
 // When enabled, the client tries to discover its container ID and sends it to the Agent
 // to enrich the metrics with container tags.
-// Origin detection can be disabled by configuring the environment variabe DD_ORIGIN_DETECTION_ENABLED=false
-// The client tries to read the container ID by parsing the file /proc/self/cgroup, this is not supported on Windows.
-// The client prioritizes the value passed via DD_ENTITY_ID (if set) over the container ID.
+// If the container id is not found and the client is running in a private cgroup namespace, the client
+// sends the base cgroup controller inode.
+// Origin detection can be disabled by configuring the environment variable DD_ORIGIN_DETECTION_ENABLED=false
 //
 // More on this here: https://docs.datadoghq.com/developers/dogstatsd/?tab=kubernetes#origin-detection-over-udp
 func WithOriginDetection() Option {
@@ -408,6 +413,31 @@ func WithOriginDetection() Option {
 func WithContainerID(id string) Option {
 	return func(o *Options) error {
 		o.containerID = id
+		return nil
+	}
+}
+
+// WithCardinality sets the tag cardinality of the metric.
+func WithCardinality(card Cardinality) Option {
+	return func(o *Options) error {
+		if !card.isValid() {
+			return fmt.Errorf("invalid cardinality %d", card)
+		}
+		o.tagCardinality = &card
+		return nil
+	}
+}
+
+// WithAggregatorShardCount sets the number of shards used for the aggregator.
+// Higher values reduce lock contention but increase memory usage.
+//
+// The default is 1 as to mimic current behavior.
+func WithAggregatorShardCount(shardCount int) Option {
+	return func(o *Options) error {
+		if shardCount < 1 {
+			return fmt.Errorf("shardCount must be a positive integer")
+		}
+		o.aggregatorShardCount = shardCount
 		return nil
 	}
 }

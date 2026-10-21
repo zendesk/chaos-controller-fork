@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package v1beta1
 
@@ -9,8 +9,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/DataDog/chaos-controller/log"
-
+	tagutil "github.com/DataDog/chaos-controller/o11y/tags"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -119,8 +118,8 @@ func (d *DisruptionCron) IsReadyToRemoveFinalizer(finalizerDelay time.Duration) 
 // getMetricsTags parses the disruptioncron to generate metrics tags
 func (d *DisruptionCron) getMetricsTags() []string {
 	tags := []string{
-		fmt.Sprintf("%s:%s", log.DisruptionCronNameKey, d.Name),
-		fmt.Sprintf("%s:%s", log.DisruptionCronNamespaceKey, d.Namespace),
+		tagutil.FormatTag(tagutil.DisruptionCronNameKey, d.Name),
+		tagutil.FormatTag(tagutil.DisruptionCronNamespaceKey, d.Namespace),
 	}
 
 	return tags

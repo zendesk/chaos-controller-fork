@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package v1beta1
 
@@ -14,14 +14,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-
-	"github.com/DataDog/chaos-controller/cloudservice"
-	cloudtypes "github.com/DataDog/chaos-controller/cloudservice/types"
-	cLog "github.com/DataDog/chaos-controller/log"
-	"github.com/DataDog/chaos-controller/o11y/metrics"
-	"github.com/DataDog/chaos-controller/o11y/tracer"
-	chaostypes "github.com/DataDog/chaos-controller/types"
-	"github.com/DataDog/chaos-controller/utils"
 
 	"github.com/hashicorp/go-multierror"
 	"go.opentelemetry.io/otel/trace"
@@ -36,11 +28,21 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/DataDog/chaos-controller/cloudservice"
+	cloudtypes "github.com/DataDog/chaos-controller/cloudservice/types"
+	cLog "github.com/DataDog/chaos-controller/log"
+	"github.com/DataDog/chaos-controller/o11y/metrics"
+	tagutil "github.com/DataDog/chaos-controller/o11y/tags"
+	"github.com/DataDog/chaos-controller/o11y/tracer"
+	chaostypes "github.com/DataDog/chaos-controller/types"
+	"github.com/DataDog/chaos-controller/utils"
 )
 
 var (
 	logger                          *zap.SugaredLogger
 	k8sClient                       client.Client
+	apiReader                       client.Reader
 	metricsSink                     metrics.Sink
 	tracerSink                      tracer.Sink
 	recorder                        record.EventRecorder
@@ -63,13 +65,14 @@ var (
 
 const SafemodeEnvironmentAnnotation = GroupName + "/environment"
 
-func (r *Disruption) SetupWebhookWithManager(setupWebhookConfig utils.SetupWebhookWithManagerConfig) error {
+func (d *Disruption) SetupWebhookWithManager(setupWebhookConfig utils.SetupWebhookWithManagerConfig) error {
 	logger = &zap.SugaredLogger{}
 	*logger = *setupWebhookConfig.Logger.With(
-		"source", "admission-controller",
-		"admission-controller", "disruption-webhook",
+		tagutil.SourceKey, "admission-controller",
+		tagutil.AdmissionControllerKey, "disruption-webhook",
 	)
 	k8sClient = setupWebhookConfig.Manager.GetClient()
+	apiReader = setupWebhookConfig.APIReader
 	metricsSink = setupWebhookConfig.MetricsSink
 	tracerSink = setupWebhookConfig.TracerSink
 	recorder = setupWebhookConfig.Recorder
@@ -95,63 +98,81 @@ func (r *Disruption) SetupWebhookWithManager(setupWebhookConfig utils.SetupWebho
 	permittedUserGroupWarningString = strings.Join(setupWebhookConfig.PermittedUserGroups, ",")
 
 	return ctrl.NewWebhookManagedBy(setupWebhookConfig.Manager).
-		For(r).
+		WithDefaulter(&Disruption{}).
+		WithValidator(&Disruption{}).
+		For(d).
 		Complete()
 }
 
 //+kubebuilder:webhook:webhookVersions={v1},path=/mutate-chaos-datadoghq-com-v1beta1-disruption,mutating=true,failurePolicy=fail,sideEffects=None,groups=chaos.datadoghq.com,resources=disruptions,verbs=create;update,versions=v1beta1,name=mdisruption.kb.io,admissionReviewVersions={v1,v1beta1}
 
-var _ webhook.Defaulter = &Disruption{}
+var _ webhook.CustomDefaulter = &Disruption{}
 
-// Default implements webhook.Defaulter so a webhook will be registered for the type
-func (r *Disruption) Default() {
-	r.Spec.SetDefaults()
+// Default implements webhook.CustomDefaulter so a webhook will be registered for the type
+func (d *Disruption) Default(_ context.Context, obj runtime.Object) error {
+	disruptionObj, ok := obj.(*Disruption)
+	if !ok {
+		return fmt.Errorf("expected *Disruption, got %T", obj)
+	}
+
+	disruptionObj.Spec.SetDefaults()
+
+	return nil
 }
 
 //+kubebuilder:webhook:webhookVersions={v1},path=/validate-chaos-datadoghq-com-v1beta1-disruption,mutating=false,failurePolicy=fail,sideEffects=None,groups=chaos.datadoghq.com,resources=disruptions,verbs=create;update;delete,versions=v1beta1,name=vdisruption.kb.io,admissionReviewVersions={v1,v1beta1}
 
-var _ webhook.Validator = &Disruption{}
+var _ webhook.CustomValidator = &Disruption{}
 
-// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (r *Disruption) ValidateCreate() (_ admission.Warnings, err error) {
-	log := logger.With(cLog.DisruptionNameKey, r.Name, cLog.DisruptionNamespaceKey, r.Namespace)
+// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
+func (d *Disruption) ValidateCreate(ctx context.Context, obj runtime.Object) (_ admission.Warnings, err error) {
+	disruptionObj, ok := obj.(*Disruption)
+	if !ok {
+		return nil, fmt.Errorf("expected *Disruption, got %T", obj)
+	}
 
-	metricTags := r.getMetricsTags()
+	// Use the object from parameter instead of r
+	log := logger.With(
+		tagutil.DisruptionNameKey, disruptionObj.Name,
+		tagutil.DisruptionNamespaceKey, disruptionObj.Namespace,
+	)
+
+	metricTags := disruptionObj.getMetricsTags()
 
 	defer func() {
 		if err != nil {
 			if mErr := metricsSink.MetricValidationFailed(metricTags); mErr != nil {
-				log.Errorw("error sending a metric", "error", mErr)
+				log.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 			}
 		}
 	}()
 
-	ctx, err := r.SpanContext(context.Background())
+	ctx, err = disruptionObj.SpanContext(ctx)
 	if err != nil {
-		log.Errorw("did not find span context", "err", err)
+		log.Errorw("did not find span context", tagutil.ErrorKey, err)
 	} else {
 		log = log.With(tracerSink.GetLoggableTraceContext(trace.SpanFromContext(ctx))...)
 	}
 
-	log.Infow("validating created disruption", "spec", r.Spec)
+	log.Infow("validating created disruption", tagutil.SpecKey, disruptionObj.Spec)
 
 	// delete-only mode, reject everything trying to be created
 	if deleteOnly {
 		return nil, errors.New("the controller is currently in delete-only mode, you can't create new disruptions for now")
 	}
 
-	if err = validateUserInfoGroup(r, permittedUserGroups, permittedUserGroupWarningString); err != nil {
+	if err = validateUserInfoGroup(disruptionObj, permittedUserGroups, permittedUserGroupWarningString); err != nil {
 		return nil, err
 	}
 
 	// reject disruptions with a name which would not be a valid label value
 	// according to https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
-	if _, err := labels.Parse(fmt.Sprintf("name=%s", r.Name)); err != nil {
+	if _, err := labels.Parse(fmt.Sprintf("name=%s", disruptionObj.Name)); err != nil {
 		return nil, fmt.Errorf("invalid disruption name: %w", err)
 	}
 
 	if safemodeEnvironment != "" {
-		disruptionEnv, ok := r.Annotations[SafemodeEnvironmentAnnotation]
+		disruptionEnv, ok := disruptionObj.Annotations[SafemodeEnvironmentAnnotation]
 		if !ok {
 			return nil, fmt.Errorf("your disruption does not specify the environment it expects to run in, but this controller requires it to do. Set an annotation on this disruption with the key `%s` and the value `\"%s\"` to run in this kubernetes cluster. Be sure that you intend to run this disruption in %s",
 				SafemodeEnvironmentAnnotation,
@@ -171,18 +192,18 @@ func (r *Disruption) ValidateCreate() (_ admission.Warnings, err error) {
 	}
 
 	// handle a disruption using the onInit feature without the handler being enabled
-	if !handlerEnabled && r.Spec.OnInit {
+	if !handlerEnabled && disruptionObj.Spec.OnInit {
 		return nil, errors.New("the chaos handler is disabled but the disruption onInit field is set to true, please enable the handler by specifying the --handler-enabled flag to the controller if you want to use the onInit feature (requires Kubernetes >= 1.15)")
 	}
 
-	if r.Spec.Network != nil {
+	if disruptionObj.Spec.Network != nil {
 		// this is the minimum estimated number of tc filters we could have for the disruption
 		// knowing a service is filtered by both its service IP and the pod(s) IP where the service is
 		// we don't count the number of Pods hosting the service here because this could be changing
-		estimatedTcFiltersNb := len(r.Spec.Network.Hosts) + (len(r.Spec.Network.Services) * 2)
+		estimatedTcFiltersNb := len(disruptionObj.Spec.Network.Hosts) + (len(disruptionObj.Spec.Network.Services) * 2)
 
-		if r.Spec.Network.Cloud != nil {
-			clouds := r.Spec.Network.Cloud.TransformToCloudMap()
+		if disruptionObj.Spec.Network.Cloud != nil {
+			clouds := disruptionObj.Spec.Network.Cloud.TransformToCloudMap()
 
 			for cloudName, serviceList := range clouds {
 				serviceListNames := []string{}
@@ -191,7 +212,11 @@ func (r *Disruption) ValidateCreate() (_ admission.Warnings, err error) {
 					serviceListNames = append(serviceListNames, service.ServiceName)
 				}
 
-				ipRangesPerService, err := cloudServicesProvidersManager.GetServicesIPRanges(cloudtypes.CloudProviderName(cloudName), serviceListNames)
+				ipRangesPerService, err := cloudServicesProvidersManager.GetServicesIPRanges(
+					cLog.WithLogger(ctx, logger),
+					cloudtypes.CloudProviderName(cloudName),
+					serviceListNames,
+				)
 				if err != nil {
 					return nil, err
 				}
@@ -203,37 +228,50 @@ func (r *Disruption) ValidateCreate() (_ admission.Warnings, err error) {
 		}
 
 		if estimatedTcFiltersNb > MaximumTCFilters {
-			return nil, fmt.Errorf("the number of resources (ips, ip ranges, single port) to filter is too high (%d). Please remove some hosts, services or cloud managed services to be affected in the disruption. Maximum resources (ips, ip ranges, single port) filterable is %d", estimatedTcFiltersNb, MaximumTCFilters)
+			return nil, fmt.Errorf("the number of resources (ips, ip ranges, single port) to filter is too high (%d). Please remove some hosts, services or cloud managed services to be affected in the disruption. Maximum resources (ips, ip ranges, single port) filterable is %d",
+				estimatedTcFiltersNb,
+				MaximumTCFilters,
+			)
 		}
 	}
 
-	if err = r.Spec.Validate(); err != nil {
+	if err = disruptionObj.Spec.Validate(); err != nil {
 		return nil, err
 	}
 
-	if r.Spec.Triggers != nil && !r.Spec.Triggers.IsZero() {
+	if disruptionObj.Spec.Triggers != nil && !disruptionObj.Spec.Triggers.IsZero() {
 		now := metav1.Now()
 
-		if !r.Spec.Triggers.Inject.IsZero() && !r.Spec.Triggers.Inject.NotBefore.IsZero() && r.Spec.Triggers.Inject.NotBefore.Before(&now) {
-			return nil, fmt.Errorf("spec.trigger.inject.notBefore is %s, which is in the past. only values in the future are accepted", r.Spec.Triggers.Inject.NotBefore)
+		if !disruptionObj.Spec.Triggers.Inject.IsZero() &&
+			!disruptionObj.Spec.Triggers.Inject.NotBefore.IsZero() &&
+			disruptionObj.Spec.Triggers.Inject.NotBefore.Before(&now) {
+			return nil, fmt.Errorf("spec.trigger.inject.notBefore is %s, which is in the past. only values in the future are accepted",
+				disruptionObj.Spec.Triggers.Inject.NotBefore,
+			)
 		}
 
-		if !r.Spec.Triggers.CreatePods.IsZero() && !r.Spec.Triggers.CreatePods.NotBefore.IsZero() && r.Spec.Triggers.CreatePods.NotBefore.Before(&now) {
-			return nil, fmt.Errorf("spec.trigger.createPods.notBefore is %s, which is in the past. only values in the future are accepted", r.Spec.Triggers.CreatePods.NotBefore)
+		if !disruptionObj.Spec.Triggers.CreatePods.IsZero() &&
+			!disruptionObj.Spec.Triggers.CreatePods.NotBefore.IsZero() &&
+			disruptionObj.Spec.Triggers.CreatePods.NotBefore.Before(&now) {
+			return nil, fmt.Errorf("spec.trigger.createPods.notBefore is %s, which is in the past. only values in the future are accepted",
+				disruptionObj.Spec.Triggers.CreatePods.NotBefore,
+			)
 		}
 	}
 
-	if maxDuration > 0 && r.Spec.Duration.Duration() > maxDuration {
-		return nil, fmt.Errorf("you have specified a duration of %s, but the maximum duration allowed is %s, please specify a duration lower or equal than this value", r.Spec.Duration.Duration(), maxDuration)
+	if maxDuration > 0 && disruptionObj.Spec.Duration.Duration() > maxDuration {
+		return nil, fmt.Errorf("you have specified a duration of %s, but the maximum duration allowed is %s, please specify a duration lower or equal than this value",
+			disruptionObj.Spec.Duration.Duration(), maxDuration,
+		)
 	}
 
-	if err := checkForDisabledDisruptions(r); err != nil {
+	if err := checkForDisabledDisruptions(disruptionObj); err != nil {
 		return nil, err
 	}
 
 	// handle initial safety nets
 	if enableSafemode {
-		if responses, err := r.initialSafetyNets(); err != nil {
+		if responses, err := disruptionObj.initialSafetyNets(ctx); err != nil {
 			return nil, err
 		} else if len(responses) > 0 {
 			retErr := errors.New("at least one of the initial safety nets caught an issue")
@@ -245,14 +283,14 @@ func (r *Disruption) ValidateCreate() (_ admission.Warnings, err error) {
 		}
 	}
 
-	if mErr := metricsSink.MetricValidationCreated(r.getMetricsTags()); mErr != nil {
-		log.Errorw("error sending a metric", "error", mErr)
+	if mErr := metricsSink.MetricValidationCreated(disruptionObj.getMetricsTags()); mErr != nil {
+		log.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 	}
 
 	// send informative event to disruption to broadcast
-	disruptionJSON, err := json.Marshal(r)
+	disruptionJSON, err := json.Marshal(disruptionObj)
 	if err != nil {
-		log.Errorw("failed to marshal disruption", "error", err)
+		log.Errorw("failed to marshal disruption", tagutil.ErrorKey, err)
 		return nil, nil
 	}
 
@@ -260,37 +298,57 @@ func (r *Disruption) ValidateCreate() (_ admission.Warnings, err error) {
 		EventDisruptionAnnotation: string(disruptionJSON),
 	}
 
-	recorder.AnnotatedEventf(r, annotations, Events[EventDisruptionCreated].Type, string(EventDisruptionCreated), Events[EventDisruptionCreated].OnDisruptionTemplateMessage)
+	recorder.AnnotatedEventf(disruptionObj, annotations, Events[EventDisruptionCreated].Type, string(EventDisruptionCreated), "%s", Events[EventDisruptionCreated].OnDisruptionTemplateMessage)
 
 	return nil, nil
 }
 
-// ValidateUpdate implements webhook.Validator so a webhook will be registered for the type
-func (r *Disruption) ValidateUpdate(old runtime.Object) (_ admission.Warnings, err error) {
-	log := logger.With(cLog.DisruptionNameKey, r.Name, cLog.DisruptionNamespaceKey, r.Namespace)
-	log.Debugw("validating updated disruption", "spec", r.Spec)
+// ValidateUpdate implements webhook.CustomValidator so a webhook will be registered for the type
+func (d *Disruption) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (_ admission.Warnings, err error) {
+	newDisruptionObj, ok := newObj.(*Disruption)
+	if !ok {
+		return nil, fmt.Errorf("expected *Disruption, got %T", newObj)
+	}
 
-	metricTags := r.getMetricsTags()
+	oldDisruption, ok := oldObj.(*Disruption)
+	if !ok {
+		return nil, fmt.Errorf("expected *Disruption, got %T", oldObj)
+	}
+
+	log := logger.With(
+		tagutil.DisruptionNameKey, newDisruptionObj.Name,
+		tagutil.DisruptionNamespaceKey, newDisruptionObj.Namespace,
+	)
+	log.Debugw("validating updated disruption", tagutil.SpecKey, newDisruptionObj.Spec)
+
+	ctx := cLog.WithLogger(context.Background(), log)
+
+	metricTags := newDisruptionObj.getMetricsTags()
 
 	defer func() {
 		if err != nil {
 			if mErr := metricsSink.MetricValidationFailed(metricTags); mErr != nil {
-				log.Errorw("error sending a metric", "error", mErr)
+				log.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 			}
 		}
 	}()
 
-	oldDisruption := old.(*Disruption)
-
-	if err = validateUserInfoImmutable(oldDisruption, r); err != nil {
+	if err = validateUserInfoImmutable(oldDisruption, newDisruptionObj); err != nil {
 		return nil, err
 	}
 
 	// ensure finalizer removal is only allowed if no related chaos pods exists
 	// we should NOT always prevent finalizer removal because chaos controller reconcile loop will go through this mutating webhook when perfoming updates
 	// and need to be able to remove the finalizer to enable the disruption to be garbage collected on successful removal
-	if controllerutil.ContainsFinalizer(oldDisruption, chaostypes.DisruptionFinalizer) && !controllerutil.ContainsFinalizer(r, chaostypes.DisruptionFinalizer) {
-		oldPods, err := GetChaosPods(context.Background(), log, chaosNamespace, k8sClient, oldDisruption, nil)
+	if controllerutil.ContainsFinalizer(oldDisruption, chaostypes.DisruptionFinalizer) &&
+		!controllerutil.ContainsFinalizer(newDisruptionObj, chaostypes.DisruptionFinalizer) {
+		oldPods, err := GetChaosPods(
+			ctx,
+			chaosNamespace,
+			k8sClient,
+			oldDisruption,
+			nil,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("error getting disruption pods: %w", err)
 		}
@@ -318,8 +376,7 @@ You first need to remove those chaos pods (and potentially their finalizers) to 
 			return nil, fmt.Errorf("error getting old disruption hash: %w", err)
 		}
 
-		newHash, err = r.Spec.Hash()
-
+		newHash, err = newDisruptionObj.Spec.Hash()
 		if err != nil {
 			return nil, fmt.Errorf("error getting new disruption hash: %w", err)
 		}
@@ -329,16 +386,16 @@ You first need to remove those chaos pods (and potentially their finalizers) to 
 			return nil, fmt.Errorf("error getting old disruption hash: %w", err)
 		}
 
-		newHash, err = r.Spec.HashNoCount()
+		newHash, err = newDisruptionObj.Spec.HashNoCount()
 		if err != nil {
 			return nil, fmt.Errorf("error getting new disruption hash: %w", err)
 		}
 	}
 
-	log.Debugw("comparing disruption spec hashes", "oldHash", oldHash, "newHash", newHash)
+	log.Debugw("comparing disruption spec hashes", tagutil.OldHashKey, oldHash, tagutil.NewHashKey, newHash)
 
 	if oldHash != newHash {
-		log.Errorw("error when comparing disruption spec hashes", "oldHash", oldHash, "newHash", newHash)
+		log.Errorw("error when comparing disruption spec hashes", tagutil.OldHashKey, oldHash, tagutil.NewHashKey, newHash)
 
 		if oldDisruption.Spec.StaticTargeting {
 			return nil, fmt.Errorf("[StaticTargeting: true] a disruption spec cannot be updated, please delete and recreate it if needed")
@@ -347,52 +404,62 @@ You first need to remove those chaos pods (and potentially their finalizers) to 
 		return nil, fmt.Errorf("[StaticTargeting: false] only a disruption spec's Count field can be updated, please delete and recreate it if needed")
 	}
 
-	if err := r.Spec.Validate(); err != nil {
+	if err := newDisruptionObj.Spec.Validate(); err != nil {
 		return nil, err
 	}
 
-	if mErr := metricsSink.MetricValidationUpdated(r.getMetricsTags()); mErr != nil {
-		log.Errorw("error sending a metric", "error", mErr)
+	if mErr := metricsSink.MetricValidationUpdated(newDisruptionObj.getMetricsTags()); mErr != nil {
+		log.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 	}
 
 	return nil, nil
 }
 
-// ValidateDelete implements webhook.Validator so a webhook will be registered for the type
-func (r *Disruption) ValidateDelete() (admission.Warnings, error) {
-	if mErr := metricsSink.MetricValidationDeleted(r.getMetricsTags()); mErr != nil {
-		logger.Errorw("error sending a metric", "error", mErr)
+// ValidateDelete implements webhook.CustomValidator so a webhook will be registered for the type
+func (d *Disruption) ValidateDelete(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+	disruptionObj, ok := obj.(*Disruption)
+	if !ok {
+		return nil, fmt.Errorf("expected *Disruption, got %T", obj)
+	}
+
+	// Use the object from parameter
+	if mErr := metricsSink.MetricValidationDeleted(disruptionObj.getMetricsTags()); mErr != nil {
+		logger.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 	}
 
 	return nil, nil
 }
 
 // getMetricsTags parses the disruption to generate metrics tags
-func (r *Disruption) getMetricsTags() []string {
+func (d *Disruption) getMetricsTags() []string {
 	tags := []string{
-		fmt.Sprintf("%s:%s", cLog.DisruptionNameKey, r.Name),
-		fmt.Sprintf("%s:%s", cLog.DisruptionNamespaceKey, r.Namespace),
+		tagutil.FormatTag(tagutil.DisruptionNameKey, d.Name),
+		tagutil.FormatTag(tagutil.DisruptionNamespaceKey, d.Namespace),
 	}
 
-	if userInfo, err := r.UserInfo(); !errors.Is(err, ErrNoUserInfo) {
+	if userInfo, err := d.UserInfo(); !errors.Is(err, ErrNoUserInfo) {
 		if err != nil {
-			logger.Errorw("error retrieving user info from disruption, using empty user info", "error", err, cLog.DisruptionNameKey, r.Name, cLog.DisruptionNamespaceKey, r.Namespace)
+			logger.Errorw("error retrieving user info from disruption, using empty user info",
+				tagutil.ErrorKey, err,
+				tagutil.DisruptionNameKey, d.Name,
+				tagutil.DisruptionNamespaceKey, d.Namespace,
+			)
 		}
 
-		tags = append(tags, "username:"+userInfo.Username)
+		tags = append(tags, tagutil.FormatTag(tagutil.UsernameKey, userInfo.Username))
 
 		// add groups
 		for _, group := range userInfo.Groups {
-			tags = append(tags, "group:"+group)
+			tags = append(tags, tagutil.FormatTag(tagutil.GroupKey, group))
 		}
 	}
 
 	// add selectors
-	for key, val := range r.Spec.Selector {
+	for key, val := range d.Spec.Selector {
 		tags = append(tags, fmt.Sprintf("selector:%s:%s", key, val))
 	}
 
-	for _, lsr := range r.Spec.AdvancedSelector {
+	for _, lsr := range d.Spec.AdvancedSelector {
 		value := ""
 		if lsr.Operator == metav1.LabelSelectorOpIn || lsr.Operator == metav1.LabelSelectorOpNotIn {
 			value = fmt.Sprintf(":%s", lsr.Values)
@@ -402,53 +469,60 @@ func (r *Disruption) getMetricsTags() []string {
 	}
 
 	// add kinds
-	for _, kind := range r.Spec.KindNames() {
-		tags = append(tags, "kind:"+string(kind))
+	for _, kind := range d.Spec.KindNames() {
+		tags = append(tags, tagutil.FormatTag(tagutil.KindKey, string(kind)))
 	}
 
-	tags = append(tags, "level:"+string(r.Spec.Level))
+	tags = append(tags, tagutil.FormatTag(tagutil.LevelKey, string(d.Spec.Level)))
 
 	return tags
 }
 
 // initialSafetyNets runs the initial safety nets for any new disruption
 // returns a list of responses related to safety net catches if any safety net were caught and returns any errors when attempting to run the safety nets
-func (r *Disruption) initialSafetyNets() ([]string, error) {
+func (d *Disruption) initialSafetyNets(ctx context.Context) ([]string, error) {
+	if d == nil {
+		return nil, errors.New("disruption is nil")
+	}
+
 	responses := []string{}
 	// handle initial safety nets if safemode is enabled
-	if r.Spec.Unsafemode == nil || !r.Spec.Unsafemode.DisableAll {
-		if caught, response, err := safetyNetCountNotTooLarge(r); err != nil {
+	if d.Spec.Unsafemode == nil || !d.Spec.Unsafemode.DisableAll {
+		if caught, response, err := safetyNetCountNotTooLarge(ctx, d); err != nil {
 			return nil, fmt.Errorf("error checking for countNotTooLarge safetynet: %w", err)
 		} else if caught {
-			logger.Debugw("the specified count represents a large percentage of targets in either the namespace or the kubernetes cluster", "SafetyNet Catch", "Generic")
+			logger.Debugw("the specified count represents a large percentage of targets in either the namespace or the kubernetes cluster", tagutil.SafetyNetCatchKey, "Generic")
 
 			responses = append(responses, response)
 		}
 
-		if r.Spec.Network != nil {
-			if caught := safetyNetMissingNetworkFilters(*r); caught {
-				logger.Debugw("the specified disruption either contains no Host or Service filters. This will result in all network traffic being affected.", "SafetyNet Catch", "Network")
+		if d.Spec.Network != nil {
+			if caught := safetyNetMissingNetworkFilters(d); caught {
+				logger.Debugw("the specified disruption either contains no Host or Service filters. This will result in all network traffic being affected.", tagutil.SafetyNetCatchKey, "Network")
 
 				responses = append(responses, "the specified disruption either contains no Host or Service filters. This will result in all network traffic being affected.")
 			}
 		}
 
-		if r.Spec.DiskFailure != nil {
-			if caught := safetyNetAttemptsNodeRootDiskFailure(r); caught {
-				logger.Debugw("the specified disruption contains an invalid path.", "SafetyNet Catch", "DiskFailure")
+		if d.Spec.DiskFailure != nil {
+			if caught := safetyNetAttemptsNodeRootDiskFailure(d); caught {
+				logger.Debugw("the specified disruption contains an invalid path.", tagutil.SafetyNetCatchKey, "DiskFailure")
 
 				responses = append(responses, "the specified path for the disk failure disruption targeting a node must not be \"/\"")
 			}
 		}
 	}
 
-	if !allowNodeFailure && r.Spec.NodeFailure != nil {
+	if !allowNodeFailure && d.Spec.NodeFailure != nil {
 		logger.Debugw("the specified disruption is attempting a node failure and will be rejected")
 
 		responses = append(responses, "node failure disruptions are not allowed in this cluster, please use a disruption type or test elsewhere")
 	}
 
-	if !allowNodeLevel && r.Spec.Level == chaostypes.DisruptionLevelNode {
+	// Pod replacement disruptions are pod-level and don't require node-level permissions
+	// They are allowed as long as the basic disruption requirements are met
+
+	if !allowNodeLevel && d.Spec.Level == chaostypes.DisruptionLevelNode {
 		logger.Debugw("the specified disruption is applied at the node level and will be rejected")
 
 		responses = append(responses, "node level disruptions are not allowed in this cluster, please apply at the pod level or test elsewhere")
@@ -462,7 +536,7 @@ func (r *Disruption) initialSafetyNets() ([]string, error) {
 // > 66% of the k8s system being targeted warrants a safety check if we assume each of our targets are replicated
 // at least twice. > 80% in a namespace also warrants a safety check as namespaces may be shared between services.
 // returning true indicates the safety net caught something
-func safetyNetCountNotTooLarge(r *Disruption) (bool, string, error) {
+func safetyNetCountNotTooLarge(ctx context.Context, r *Disruption) (bool, string, error) {
 	if r.Spec.Unsafemode != nil && r.Spec.Unsafemode.DisableCountTooLarge {
 		return false, "", nil
 	}
@@ -491,16 +565,22 @@ func safetyNetCountNotTooLarge(r *Disruption) (bool, string, error) {
 		return false, "", nil
 	}
 
+	// Use the API reader (direct API server client) instead of the cached client
+	// for paginated listing. The controller-runtime cache does not support pagination
+	// (Limit/Continue) and may return incomplete results (see controller-runtime#3044).
+	const listPageSize = int64(1000)
+
 	if r.Spec.Level == chaostypes.DisruptionLevelPod {
-		pods := &corev1.PodList{}
+		pods := &metav1.PartialObjectMetadataList{}
+		pods.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("PodList"))
+
 		listOptions := &client.ListOptions{
-			Namespace: r.ObjectMeta.Namespace,
-			// In an effort not to fill up memory on huge list calls, limiting to 1000 objects per call
-			Limit: 1000,
+			Namespace: r.Namespace,
+			Limit:     listPageSize,
 		}
+
 		// we grab the number of pods in the specified namespace
-		err := k8sClient.List(context.Background(), pods, listOptions)
-		if err != nil {
+		if err := apiReader.List(ctx, pods, listOptions); err != nil {
 			return false, "", fmt.Errorf("error listing namespace pods: %w", err)
 		}
 
@@ -508,21 +588,24 @@ func safetyNetCountNotTooLarge(r *Disruption) (bool, string, error) {
 			namespaceCount += len(pods.Items)
 			listOptions.Continue = pods.Continue
 
-			err = k8sClient.List(context.Background(), pods, listOptions)
-			if err != nil {
-				return false, "", fmt.Errorf("error listing target pods: %w", err)
+			if err := apiReader.List(ctx, pods, listOptions); err != nil {
+				return false, "", fmt.Errorf("error listing namespace pods: %w", err)
 			}
 		}
 
 		namespaceCount += len(pods.Items)
 
+		pods = &metav1.PartialObjectMetadataList{}
+		pods.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("PodList"))
+
 		listOptions = &client.ListOptions{
-			Namespace:     r.ObjectMeta.Namespace,
+			Namespace:     r.Namespace,
 			LabelSelector: labels.SelectorFromValidatedSet(r.Spec.Selector),
+			Limit:         listPageSize,
 		}
+
 		// we grab the number of targets in the specified namespace
-		err = k8sClient.List(context.Background(), pods, listOptions)
-		if err != nil {
+		if err := apiReader.List(ctx, pods, listOptions); err != nil {
 			return false, "", fmt.Errorf("error listing target pods: %w", err)
 		}
 
@@ -530,46 +613,43 @@ func safetyNetCountNotTooLarge(r *Disruption) (bool, string, error) {
 			targetCount += len(pods.Items)
 			listOptions.Continue = pods.Continue
 
-			err = k8sClient.List(context.Background(), pods, listOptions)
-			if err != nil {
+			if err := apiReader.List(ctx, pods, listOptions); err != nil {
 				return false, "", fmt.Errorf("error listing target pods: %w", err)
 			}
 		}
 
 		targetCount += len(pods.Items)
 
+		pods = &metav1.PartialObjectMetadataList{}
+		pods.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("PodList"))
+
 		// we grab the number of pods in the entire cluster
-		err = k8sClient.List(context.Background(), pods,
-			client.Limit(1000))
-		if err != nil {
+		if err := apiReader.List(ctx, pods, client.Limit(listPageSize)); err != nil {
 			return false, "", fmt.Errorf("error listing cluster pods: %w", err)
 		}
 
 		for pods.Continue != "" {
 			totalCount += len(pods.Items)
 
-			err = k8sClient.List(context.Background(), pods, client.Limit(1000), client.Continue(pods.Continue))
-			if err != nil {
-				return false, "", fmt.Errorf("error listing target pods: %w", err)
+			if err := apiReader.List(ctx, pods, client.Limit(listPageSize), client.Continue(pods.Continue)); err != nil {
+				return false, "", fmt.Errorf("error listing cluster pods: %w", err)
 			}
 		}
 
 		totalCount += len(pods.Items)
 	} else {
-		nodes := &corev1.NodeList{}
+		nodes := &metav1.PartialObjectMetadataList{}
+		nodes.SetGroupVersionKind(corev1.SchemeGroupVersion.WithKind("NodeList"))
 
-		err := k8sClient.List(context.Background(), nodes,
-			client.Limit(1000))
-		if err != nil {
-			return false, "", fmt.Errorf("error listing target pods: %w", err)
+		if err := apiReader.List(ctx, nodes, client.Limit(listPageSize)); err != nil {
+			return false, "", fmt.Errorf("error listing nodes: %w", err)
 		}
 
 		for nodes.Continue != "" {
 			totalCount += len(nodes.Items)
 
-			err = k8sClient.List(context.Background(), nodes, client.Limit(1000), client.Continue(nodes.Continue))
-			if err != nil {
-				return false, "", fmt.Errorf("error listing target pods: %w", err)
+			if err := apiReader.List(ctx, nodes, client.Limit(listPageSize), client.Continue(nodes.Continue)); err != nil {
+				return false, "", fmt.Errorf("error listing nodes: %w", err)
 			}
 		}
 
@@ -594,15 +674,15 @@ func safetyNetCountNotTooLarge(r *Disruption) (bool, string, error) {
 	}
 
 	logger.Debugw("comparing estimated target count to total existing targets",
-		cLog.DisruptionNameKey, r.Name,
-		cLog.DisruptionNamespaceKey, r.Namespace,
-		"namespaceThreshold", namespaceThreshold,
-		"clusterThreshold", clusterThreshold,
-		"estimatedEligibleTargetsCount", targetCount,
-		"namespaceCount", namespaceCount,
-		"totalCount", totalCount,
-		"calculatedPercentOfTotal", userCountVal/float64(totalCount),
-		"estimatedTargetCount", userCountVal,
+		tagutil.DisruptionNameKey, r.Name,
+		tagutil.DisruptionNamespaceKey, r.Namespace,
+		tagutil.NamespaceThresholdKey, namespaceThreshold,
+		tagutil.ClusterThresholdKey, clusterThreshold,
+		tagutil.EstimatedEligibleTargetsCountKey, targetCount,
+		tagutil.NamespaceCountKey, namespaceCount,
+		tagutil.TotalCountKey, totalCount,
+		tagutil.CalculatedPercentOfTotalKey, userCountVal/float64(totalCount),
+		tagutil.EstimatedTargetCountKey, userCountVal,
 	)
 
 	// we check to see if the count represents > namespaceThreshold (default 80) percent of all pods in the existing namespace
@@ -624,7 +704,11 @@ func safetyNetCountNotTooLarge(r *Disruption) (bool, string, error) {
 
 // safetyNetMissingNetworkFilters is the safety net regarding missing host, service, or port filters.
 // it will check if any filters have been placed to limit which network traffic is disrupted
-func safetyNetMissingNetworkFilters(r Disruption) bool {
+func safetyNetMissingNetworkFilters(r *Disruption) bool {
+	if r == nil {
+		return false
+	}
+
 	if r.Spec.Unsafemode != nil && r.Spec.Unsafemode.DisableNeitherHostNorPort {
 		return false
 	}

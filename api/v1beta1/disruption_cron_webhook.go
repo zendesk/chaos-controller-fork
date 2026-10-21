@@ -1,20 +1,17 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package v1beta1
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
-
-	cLog "github.com/DataDog/chaos-controller/log"
-	"github.com/DataDog/chaos-controller/o11y/metrics"
-	"github.com/DataDog/chaos-controller/utils"
 
 	"github.com/robfig/cron"
 	"go.uber.org/zap"
@@ -26,6 +23,10 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	"github.com/DataDog/chaos-controller/o11y/metrics"
+	tagutil "github.com/DataDog/chaos-controller/o11y/tags"
+	"github.com/DataDog/chaos-controller/utils"
 )
 
 const (
@@ -48,8 +49,8 @@ func (d *DisruptionCron) SetupWebhookWithManager(setupWebhookConfig utils.SetupW
 	disruptionCronWebhookRecorder = setupWebhookConfig.Recorder
 	disruptionCronWebhookDeleteOnly = setupWebhookConfig.DeleteOnlyFlag
 	disruptionCronWebhookLogger = setupWebhookConfig.Logger.With(
-		"source", "admission-controller",
-		"admission-controller", "disruption-cron-webhook",
+		tagutil.SourceKey, "admission-controller",
+		tagutil.AdmissionControllerKey, "disruption-cron-webhook",
 	)
 	disruptionCronMetricsSink = setupWebhookConfig.MetricsSink
 
@@ -65,38 +66,66 @@ func (d *DisruptionCron) SetupWebhookWithManager(setupWebhookConfig utils.SetupW
 	defaultDuration = setupWebhookConfig.DefaultDurationFlag
 
 	return ctrl.NewWebhookManagedBy(setupWebhookConfig.Manager).
+		WithDefaulter(&DisruptionCron{}).
+		WithValidator(&DisruptionCron{}).
 		For(d).
 		Complete()
 }
 
 //+kubebuilder:webhook:webhookVersions={v1},path=/mutate-chaos-datadoghq-com-v1beta1-disruptioncron,mutating=true,failurePolicy=fail,sideEffects=None,groups=chaos.datadoghq.com,resources=disruptioncrons,verbs=create;update,versions=v1beta1,name=mdisruptioncron.kb.io,admissionReviewVersions={v1,v1beta1}
 
-var _ webhook.Defaulter = &DisruptionCron{}
+var _ webhook.CustomDefaulter = &DisruptionCron{}
 
-// Default implements webhook.Defaulter so a webhook will be registered for the type
-func (d *DisruptionCron) Default() {
-	if d.Spec.DelayedStartTolerance.Duration() == 0 {
-		logger.Infow(fmt.Sprintf("setting default delayedStartTolerance of %s in disruptionCron", defaultCronDelayedStartTolerance), cLog.DisruptionCronNameKey, d.Name, cLog.DisruptionCronNamespaceKey, d.Namespace)
-		d.Spec.DelayedStartTolerance = DisruptionDuration(defaultCronDelayedStartTolerance.String())
+// Default implements webhook.CustomDefaulter so a webhook will be registered for the type
+func (d *DisruptionCron) Default(_ context.Context, obj runtime.Object) error {
+	disruptionCronObj, ok := obj.(*DisruptionCron)
+	if !ok {
+		return fmt.Errorf("expected *DisruptionCron, got %T", obj)
 	}
+
+	log := disruptionCronWebhookLogger.With(
+		tagutil.DisruptionCronNameKey, disruptionCronObj.Name,
+		tagutil.DisruptionCronNamespaceKey, disruptionCronObj.Namespace,
+	)
+
+	log.Infow("defaulting disruption cron", tagutil.SpecKey, disruptionCronObj.Spec)
+
+	if disruptionCronObj.Spec.DelayedStartTolerance.Duration() == 0 {
+		log.Infow(fmt.Sprintf("setting default delayedStartTolerance of %s in disruptionCron", defaultCronDelayedStartTolerance),
+			tagutil.DisruptionCronNameKey, disruptionCronObj.Name,
+			tagutil.DisruptionCronNamespaceKey, disruptionCronObj.Namespace,
+		)
+
+		disruptionCronObj.Spec.DelayedStartTolerance = DisruptionDuration(defaultCronDelayedStartTolerance.String())
+	}
+
+	return nil
 }
 
 //+kubebuilder:webhook:webhookVersions={v1},path=/validate-chaos-datadoghq-com-v1beta1-disruptioncron,mutating=false,failurePolicy=fail,sideEffects=None,groups=chaos.datadoghq.com,resources=disruptioncrons,verbs=create;update;delete,versions=v1beta1,name=vdisruptioncron.kb.io,admissionReviewVersions={v1,v1beta1}
 
-var _ webhook.Validator = &DisruptionCron{}
+var _ webhook.CustomValidator = &DisruptionCron{}
 
-// ValidateCreate implements webhook.Validator so a webhook will be registered for the type
-func (d *DisruptionCron) ValidateCreate() (_ admission.Warnings, err error) {
-	log := disruptionCronWebhookLogger.With(cLog.DisruptionCronNameKey, d.Name, cLog.DisruptionCronNamespaceKey, d.Namespace)
+// ValidateCreate implements webhook.CustomValidator so a webhook will be registered for the type
+func (d *DisruptionCron) ValidateCreate(_ context.Context, obj runtime.Object) (warnings admission.Warnings, err error) {
+	disruptionCronObj, ok := obj.(*DisruptionCron)
+	if !ok {
+		return nil, fmt.Errorf("expected *DisruptionCron, got %T", obj)
+	}
 
-	log.Infow("validating created disruption cron", "spec", d.Spec)
+	log := disruptionCronWebhookLogger.With(
+		tagutil.DisruptionCronNameKey, disruptionCronObj.Name,
+		tagutil.DisruptionCronNamespaceKey, disruptionCronObj.Namespace,
+	)
 
-	metricTags := d.getMetricsTags()
+	log.Infow("validating created disruption cron", tagutil.SpecKey, disruptionCronObj.Spec)
+
+	metricTags := disruptionCronObj.getMetricsTags()
 
 	defer func() {
 		if err != nil {
 			if mErr := disruptionCronMetricsSink.MetricValidationFailed(metricTags); mErr != nil {
-				log.Errorw("error sending a metric", "error", mErr)
+				log.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 			}
 		}
 	}()
@@ -106,92 +135,113 @@ func (d *DisruptionCron) ValidateCreate() (_ admission.Warnings, err error) {
 		return nil, errors.New("the controller is currently in delete-only mode, you can't create new disruption cron for now")
 	}
 
-	if err = validateUserInfoGroup(d, disruptionCronPermittedUserGroups, disruptionCronPermittedUserGroupString); err != nil {
+	if err = validateUserInfoGroup(disruptionCronObj, disruptionCronPermittedUserGroups, disruptionCronPermittedUserGroupString); err != nil {
 		return nil, err
 	}
 
-	if err = d.validateDisruptionCronName(); err != nil {
+	if err = disruptionCronObj.validateDisruptionCronName(); err != nil {
 		return nil, err
 	}
 
-	if err = d.validateDisruptionCronSpec(); err != nil {
+	if err = disruptionCronObj.validateDisruptionCronSpec(); err != nil {
 		return nil, err
 	}
 
-	if err = d.validateMinimumFrequency(minimumCronFrequency); err != nil {
+	if err = disruptionCronObj.validateMinimumFrequency(minimumCronFrequency); err != nil {
 		return nil, err
 	}
 
 	if mErr := metricsSink.MetricValidationCreated(metricTags); mErr != nil {
-		log.Errorw("error sending a metric", "error", mErr)
+		log.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 	}
 
 	// send informative event to disruption cron to broadcast
-	d.emitEvent(EventDisruptionCronCreated)
+	disruptionCronObj.emitEvent(EventDisruptionCronCreated)
 
 	return nil, nil
 }
 
-func (d *DisruptionCron) ValidateUpdate(oldObject runtime.Object) (_ admission.Warnings, err error) {
-	log := logger.With(cLog.DisruptionCronNameKey, d.Name, cLog.DisruptionCronNamespaceKey, d.Namespace)
+func (d *DisruptionCron) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (warnings admission.Warnings, err error) {
+	newDisruptionCronObj, ok := newObj.(*DisruptionCron)
+	if !ok {
+		return nil, fmt.Errorf("expected *DisruptionCron, got %T", newObj)
+	}
 
-	log.Infow("validating updated disruption cron", "spec", d.Spec)
+	oldDisruptionCronObj, ok := oldObj.(*DisruptionCron)
+	if !ok {
+		return nil, fmt.Errorf("expected *DisruptionCron, got %T", oldObj)
+	}
 
-	metricTags := d.getMetricsTags()
+	log := disruptionCronWebhookLogger.With(
+		tagutil.DisruptionCronNameKey, newDisruptionCronObj.Name,
+		tagutil.DisruptionCronNamespaceKey, newDisruptionCronObj.Namespace,
+	)
+
+	log.Infow("validating updated disruption cron", tagutil.SpecKey, newDisruptionCronObj.Spec)
+
+	metricTags := newDisruptionCronObj.getMetricsTags()
 
 	defer func() {
 		if err != nil {
 			if mErr := disruptionCronMetricsSink.MetricValidationFailed(metricTags); mErr != nil {
-				log.Errorw("error sending a metric", "error", mErr)
+				log.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 			}
 		}
 	}()
 
-	if err = validateUserInfoImmutable(oldObject.(*DisruptionCron), d); err != nil {
+	if err = validateUserInfoImmutable(oldDisruptionCronObj, newDisruptionCronObj); err != nil {
 		return nil, err
 	}
 
-	if err = d.validateDisruptionCronName(); err != nil {
+	if err = newDisruptionCronObj.validateDisruptionCronName(); err != nil {
 		return nil, err
 	}
 
-	if err = d.validateDisruptionCronSpec(); err != nil {
+	if err = newDisruptionCronObj.validateDisruptionCronSpec(); err != nil {
 		return nil, err
 	}
 
 	// If a DisruptionCron is already more frequent than the minimum frequency, we don't want to
 	// block updates on other parts of the spec or status. But if the schedule is being updated,
 	// we do want to enforce that it happens more often than the minimum frequency
-	if oldObject.(*DisruptionCron).Spec.Schedule != d.Spec.Schedule {
-		if err := d.validateMinimumFrequency(minimumCronFrequency); err != nil {
+	if oldDisruptionCronObj.Spec.Schedule != newDisruptionCronObj.Spec.Schedule {
+		if err := newDisruptionCronObj.validateMinimumFrequency(minimumCronFrequency); err != nil {
 			return nil, err
 		}
 	}
 
 	if mErr := metricsSink.MetricValidationUpdated(metricTags); mErr != nil {
-		log.Errorw("error sending a metric", "error", mErr)
+		log.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 	}
 
 	// send informative event to disruption cron to broadcast
-	d.emitEvent(EventDisruptionCronUpdated)
+	newDisruptionCronObj.emitEvent(EventDisruptionCronUpdated)
 
 	return nil, nil
 }
 
-func (d *DisruptionCron) ValidateDelete() (warnings admission.Warnings, err error) {
-	log := disruptionCronWebhookLogger.With(cLog.DisruptionCronNameKey, d.Name, cLog.DisruptionCronNamespaceKey, d.Namespace)
+func (d *DisruptionCron) ValidateDelete(_ context.Context, obj runtime.Object) (warnings admission.Warnings, err error) {
+	disruptionCronObj, ok := obj.(*DisruptionCron)
+	if !ok {
+		return nil, fmt.Errorf("expected *DisruptionCron, got %T", obj)
+	}
 
-	log.Infow("validating deleted disruption cron", "spec", d.Spec)
+	log := disruptionCronWebhookLogger.With(
+		tagutil.DisruptionCronNameKey, disruptionCronObj.Name,
+		tagutil.DisruptionCronNamespaceKey, disruptionCronObj.Namespace,
+	)
+
+	log.Infow("validating deleted disruption cron", tagutil.SpecKey, disruptionCronObj.Spec)
 
 	// During the validation of the deletion the timestamp does not exist so we need to set it before emitting the event
-	d.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+	disruptionCronObj.DeletionTimestamp = &metav1.Time{Time: time.Now()}
 
-	if mErr := metricsSink.MetricValidationDeleted(d.getMetricsTags()); mErr != nil {
-		log.Errorw("error sending a metric", "error", mErr)
+	if mErr := metricsSink.MetricValidationDeleted(disruptionCronObj.getMetricsTags()); mErr != nil {
+		log.Errorw("error sending a metric", tagutil.ErrorKey, mErr)
 	}
 
 	// send informative event to disruption cron to broadcast
-	d.emitEvent(EventDisruptionCronDeleted)
+	disruptionCronObj.emitEvent(EventDisruptionCronDeleted)
 
 	return nil, nil
 }
@@ -199,7 +249,7 @@ func (d *DisruptionCron) ValidateDelete() (warnings admission.Warnings, err erro
 func (d *DisruptionCron) emitEvent(eventReason EventReason) {
 	disruptionCronJSON, err := json.Marshal(d)
 	if err != nil {
-		disruptionCronWebhookLogger.Errorw("failed to marshal disruption cron", "error", err)
+		disruptionCronWebhookLogger.Errorw("failed to marshal disruption cron", tagutil.ErrorKey, err)
 		return
 	}
 
@@ -207,27 +257,27 @@ func (d *DisruptionCron) emitEvent(eventReason EventReason) {
 		EventDisruptionCronAnnotation: string(disruptionCronJSON),
 	}
 
-	disruptionCronWebhookRecorder.AnnotatedEventf(d, annotations, Events[eventReason].Type, string(eventReason), Events[eventReason].OnDisruptionTemplateMessage)
+	disruptionCronWebhookRecorder.AnnotatedEventf(d, annotations, Events[eventReason].Type, string(eventReason), "%s", Events[eventReason].OnDisruptionTemplateMessage)
 }
 
 func (d *DisruptionCron) validateDisruptionCronName() error {
-	if len(d.ObjectMeta.Name) == 0 {
+	if len(d.Name) == 0 {
 		return errors.New("disruption cron name must be specified")
 	}
 
-	if len(d.ObjectMeta.Name) > validationutils.DNS1035LabelMaxLength-16 {
+	if len(d.Name) > validationutils.DNS1035LabelMaxLength-16 {
 		// The disruption name length is 63 character like all Kubernetes objects
 		// (which must fit in a DNS subdomain). The disruption cron controller appends
 		// a 16-character prefix (`disruption-cron-`) when creating
 		// a disruption. The disruption name length limit is 63 characters.
 		// Therefore disruption cron names must have length <= 63-16=47.
 		// If we don't validate this here, then disruption creation will fail later.
-		return fmt.Errorf("disruption cron name exceeds maximum length: must be no more than 47 characters, currently %d", len(d.ObjectMeta.Name))
+		return fmt.Errorf("disruption cron name exceeds maximum length: must be no more than 47 characters, currently %d", len(d.Name))
 	}
 
 	// reject disruption crons with a name which would not be a valid label value
 	// according to https://kubernetes.io/docs/concepts/overview/working-with-objects/labels/#syntax-and-character-set
-	if _, err := labels.Parse(fmt.Sprintf("name=%s", d.ObjectMeta.Name)); err != nil {
+	if _, err := labels.Parse(fmt.Sprintf("name=%s", d.Name)); err != nil {
 		return fmt.Errorf("disruption cron name must follow Kubernetes label format: %w", err)
 	}
 

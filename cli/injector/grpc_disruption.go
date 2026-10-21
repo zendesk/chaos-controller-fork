@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package main
 
@@ -9,9 +9,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/spf13/cobra"
+
 	"github.com/DataDog/chaos-controller/api/v1beta1"
 	"github.com/DataDog/chaos-controller/injector"
-	"github.com/spf13/cobra"
+	"github.com/DataDog/chaos-controller/o11y/tags"
 )
 
 var grpcDisruptionCmd = &cobra.Command{
@@ -26,14 +28,14 @@ var grpcDisruptionCmd = &cobra.Command{
 		// `/chaosdogfood.ChaosDogfood/order;error;ALREADY_EXISTS`
 		// `/chaosdogfood.ChaosDogfood/order;override;{}`
 
-		log.Infow("arguments to grpcDisruptionCmd", "endpoint-alterations", rawEndpointAlterations)
+		log.Infow("arguments to grpcDisruptionCmd", tags.EndpointAlterationsKey, rawEndpointAlterations)
 
 		var endpointAlterations []v1beta1.EndpointAlteration
 
 		for _, line := range rawEndpointAlterations {
 			split := strings.Split(line, ";")
 			if len(split) != 4 {
-				log.Fatalw("could not parse --endpoint-alterations argument to grpc-disruption", "offending argument", line)
+				log.Fatalw("could not parse --endpoint-alterations argument to grpc-disruption", tags.OffendingArgumentKey, line)
 				continue
 			}
 
@@ -41,9 +43,10 @@ var grpcDisruptionCmd = &cobra.Command{
 
 			queryPercent, err := strconv.Atoi(split[3])
 			if err != nil {
-				log.Fatalw("could not parse --endpoint-alterations argument to grpc-disruption", "parsing failed for queryPercent", split[3])
+				log.Fatalw("could not parse --endpoint-alterations argument to grpc-disruption", tags.QueryPercentParsingKey, split[3])
 				continue
 			}
+
 			switch split[1] {
 			case v1beta1.ERROR:
 				endpointAlteration = v1beta1.EndpointAlteration{
@@ -58,7 +61,7 @@ var grpcDisruptionCmd = &cobra.Command{
 					QueryPercent:     queryPercent,
 				}
 			default:
-				log.Fatalw("GRPC injector does not understand alteration type", "type", split[1])
+				log.Fatalw("GRPC injector does not understand alteration type", tags.TypeKey, split[1])
 			}
 
 			endpointAlterations = append(endpointAlterations, endpointAlteration)

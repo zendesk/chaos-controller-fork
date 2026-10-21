@@ -1,18 +1,20 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package cgroup
 
 import (
 	"path/filepath"
+	"strings"
 
-	"github.com/opencontainers/runc/libcontainer/cgroups"
-	"github.com/opencontainers/runc/libcontainer/cgroups/fs"
-	"github.com/opencontainers/runc/libcontainer/cgroups/fs2"
-	"github.com/opencontainers/runc/libcontainer/configs"
+	"github.com/opencontainers/cgroups"
+	"github.com/opencontainers/cgroups/fs"
+	"github.com/opencontainers/cgroups/fs2"
 	"go.uber.org/zap"
+
+	"github.com/DataDog/chaos-controller/o11y/tags"
 )
 
 type instManager struct {
@@ -23,8 +25,8 @@ type instManager struct {
 type pkgManager struct{}
 
 func newAllCGroupManager(cgroupFile string, cgroupMount string, log *zap.SugaredLogger) (allCGroupManager, error) {
-	cg := &configs.Cgroup{
-		Resources: &configs.Resources{},
+	cg := &cgroups.Cgroup{
+		Resources: &cgroups.Resources{},
 	}
 
 	// parse the proc cgroup file
@@ -35,7 +37,14 @@ func newAllCGroupManager(cgroupFile string, cgroupMount string, log *zap.Sugared
 
 	// prefix the cgroup path with the mount point path
 	for subsystem, path := range cgroupPaths {
-		log.Debugw("adding cgroup subsystem path to manager", "subsystem", subsystem, "path", path)
+		// Skip named hierarchies (e.g. "name=systemd"): they are not resource controllers
+		// and their mount directory name differs from the subsystem key, making the path wrong.
+		if strings.HasPrefix(subsystem, "name=") {
+			delete(cgroupPaths, subsystem)
+			continue
+		}
+
+		log.Debugw("adding cgroup subsystem path to manager", tags.SubsystemKey, subsystem, tags.PathKey, path)
 		cgroupPaths[subsystem] = filepath.Join(cgroupMount, subsystem, path)
 	}
 
@@ -68,7 +77,13 @@ func (pkgManager) PathExists(path string) bool {
 }
 
 func (pkgManager) EnterPid(cgroupPaths map[string]string, pid int) error {
-	return cgroups.EnterPid(cgroupPaths, pid)
+	for _, path := range cgroupPaths {
+		if err := cgroups.WriteCgroupProc(path, pid); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (pkgManager) ReadFile(dir, file string) (string, error) {

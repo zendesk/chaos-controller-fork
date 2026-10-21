@@ -1,16 +1,18 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package main
 
 import (
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/DataDog/chaos-controller/api/v1beta1"
 	"github.com/DataDog/chaos-controller/injector"
-	"github.com/spf13/cobra"
+	"github.com/DataDog/chaos-controller/o11y/tags"
 )
 
 var networkDisruptionCmd = &cobra.Command{
@@ -30,6 +32,8 @@ var networkDisruptionCmd = &cobra.Command{
 		hostResolveInterval, _ := cmd.Flags().GetDuration("host-resolve-interval")
 		methods, _ := cmd.Flags().GetStringArray("method")
 		paths, _ := cmd.Flags().GetStringArray("path")
+		dnsPodResolvConf, _ := cmd.Flags().GetString("dns-pod-resolv-conf")
+		dnsNodeResolvConf, _ := cmd.Flags().GetString("dns-node-resolv-conf")
 
 		// prepare injectors
 		for i, config := range configs {
@@ -42,17 +46,17 @@ var networkDisruptionCmd = &cobra.Command{
 			if i == 0 {
 				parsedHosts, err := v1beta1.NetworkDisruptionHostSpecFromString(hosts)
 				if err != nil {
-					log.Fatalw("error parsing hosts", "error", err)
+					log.Fatalw("error parsing hosts", tags.ErrorKey, err)
 				}
 
 				parsedAllowedHosts, err := v1beta1.NetworkDisruptionHostSpecFromString(allowedHosts)
 				if err != nil {
-					log.Fatalw("error parsing allowed hosts", "error", err)
+					log.Fatalw("error parsing allowed hosts", tags.ErrorKey, err)
 				}
 
 				parsedServices, err := v1beta1.NetworkDisruptionServiceSpecFromString(services)
 				if err != nil {
-					log.Fatalw("error parsing services", "error", err)
+					log.Fatalw("error parsing services", tags.ErrorKey, err)
 				}
 
 				httpPaths := v1beta1.HTTPPaths{}
@@ -78,7 +82,12 @@ var networkDisruptionCmd = &cobra.Command{
 			}
 
 			// generate injector
-			inj, err := injector.NewNetworkDisruptionInjector(spec, injector.NetworkDisruptionInjectorConfig{Config: config, HostResolveInterval: hostResolveInterval})
+			inj, err := injector.NewNetworkDisruptionInjector(spec, injector.NetworkDisruptionInjectorConfig{
+				Config:              config,
+				HostResolveInterval: hostResolveInterval,
+				DNSPodResolvConf:    dnsPodResolvConf,
+				DNSNodeResolvConf:   dnsNodeResolvConf,
+			})
 			if err != nil {
 				log.Fatalw("error initializing the network disruption injector: %w", err)
 			}
@@ -101,4 +110,6 @@ func init() {
 	networkDisruptionCmd.Flags().Duration("host-resolve-interval", time.Minute, "Interval to resolve hostnames")
 	networkDisruptionCmd.Flags().StringArray("method", []string{}, "Filter by http method: GET, DELETE, POST, CREATE, PUT, HEAD, PATCH, CONNECT, OPTIONS or TRACE")
 	networkDisruptionCmd.Flags().StringArray("path", []string{v1beta1.DefaultHTTPPathFilter}, "Filter by path and must not exceed 100 characters")
+	networkDisruptionCmd.Flags().String("dns-pod-resolv-conf", "", "Path to pod DNS resolv.conf file (defaults to /etc/resolv.conf)")
+	networkDisruptionCmd.Flags().String("dns-node-resolv-conf", "", "Path to node DNS resolv.conf file (defaults to /mnt/host/etc/resolv.conf)")
 }

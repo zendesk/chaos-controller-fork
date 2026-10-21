@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package main
 
@@ -12,9 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DataDog/chaos-controller/log"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
+
+	"github.com/DataDog/chaos-controller/log"
+	"github.com/DataDog/chaos-controller/o11y/tags"
 )
 
 var (
@@ -27,7 +29,8 @@ var (
 		Short: "A simple process doing nothing but waiting for a SIGUSR1 signal to exit properly",
 		Run: func(cmd *cobra.Command, args []string) {
 			// wait for SIGUSR1 signal
-			logger.Infow("waiting for SIGUSR1", "timeout", timeout.String())
+			logger.Infow("waiting for SIGUSR1", tags.TimeoutKey, timeout.String())
+
 			sigs := make(chan os.Signal, 1)
 			signal.Notify(sigs, syscall.SIGUSR1)
 
@@ -41,6 +44,7 @@ var (
 				os.Exit(0)
 			case <-timer.C:
 				logger.Info("timed out, SIGUSR1 was never received, exiting")
+
 				if succeedOnTimeout {
 					os.Exit(0)
 				} else {
@@ -66,6 +70,6 @@ func main() {
 	}
 
 	if err := rootCmd.Execute(); err != nil {
-		logger.Errorw("error executing command", "error", err)
+		logger.Errorw("error executing command", tags.ErrorKey, err)
 	}
 }

@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package services_test
 
@@ -10,6 +10,18 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/stretchr/testify/mock"
+	"k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	chaosapi "github.com/DataDog/chaos-controller/api"
 	chaosv1beta1 "github.com/DataDog/chaos-controller/api/v1beta1"
@@ -22,35 +34,22 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/stretchr/testify/mock"
-	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
 const (
-	DefaultNamespace                      = "namespace"
-	DefaultChaosNamespace                 = "chaos-namespace"
-	DefaultDisruptionName                 = "name"
-	DefaultTargetName                     = "lorem"
-	DefaultTargetNodeName                 = "ipsum"
-	DefaultTargetPodIp                    = "10.10.10.10"
-	DefaultHostPathDirectory              = v1.HostPathDirectory
-	DefaultPathFile                       = v1.HostPathFile
-	DefaultImagePullSecrets               = "pull-secret"
-	DefaultInjectorServiceAccount         = "lorem"
-	DefaultInjectorImage                  = "image"
-	DefaultInjectorDNSDisruptionDNSServer = "8.8.8.8"
-	DefaultInjectorDNSDisruptionKubeDNS   = "9.9.9.9"
-	DefaultInjectorLogLevel               = "DEBUG"
-	DefaultMetricsSinkName                = "name"
+	DefaultNamespace              = "namespace"
+	DefaultChaosNamespace         = "chaos-namespace"
+	DefaultDisruptionName         = "name"
+	DefaultTargetName             = "lorem"
+	DefaultTargetNodeName         = "ipsum"
+	DefaultTargetPodIp            = "10.10.10.10"
+	DefaultHostPathDirectory      = v1.HostPathDirectory
+	DefaultPathFile               = v1.HostPathFile
+	DefaultImagePullSecrets       = "pull-secret"
+	DefaultInjectorServiceAccount = "lorem"
+	DefaultInjectorImage          = "image"
+	DefaultInjectorLogLevel       = "DEBUG"
+	DefaultMetricsSinkName        = "name"
 )
 
 var _ = Describe("Chaos Pod Service", func() {
@@ -83,12 +82,14 @@ var _ = Describe("Chaos Pod Service", func() {
 
 	JustBeforeEach(func() {
 		// Arrange
-		chaosPodServiceConfig.Log = logger
 		chaosPodServiceConfig.ChaosNamespace = DefaultChaosNamespace
 		chaosPodServiceConfig.MetricsSink = metricsSinkMock
 		chaosPodServiceConfig.TargetSelector = targetSelectorMock
 		if chaosPodServiceConfig.Client == nil {
 			chaosPodServiceConfig.Client = k8sClientMock
+		}
+		if chaosPodServiceConfig.Reader == nil {
+			chaosPodServiceConfig.Reader = k8sClientMock
 		}
 
 		// Action
@@ -702,8 +703,6 @@ var _ = Describe("Chaos Pod Service", func() {
 			DefaultInjectorNetworkDisruptionAllowedHosts = []string{"10.10.10.10", "11.11.11.11"}
 			chaosPodServiceConfig.Injector = services.ChaosPodServiceInjectorConfig{
 				NetworkDisruptionAllowedHosts: DefaultInjectorNetworkDisruptionAllowedHosts,
-				DNSDisruptionDNSServer:        DefaultInjectorDNSDisruptionDNSServer,
-				DNSDisruptionKubeDNS:          DefaultInjectorDNSDisruptionKubeDNS,
 			}
 			pulseActiveDuration, pulseDormantDuration, pulseInitialDelay := time.Duration(0), time.Duration(0), time.Duration(0)
 			args = chaosapi.DisruptionArgs{
@@ -713,6 +712,7 @@ var _ = Describe("Chaos Pod Service", func() {
 				TargetNodeName:       DefaultTargetNodeName,
 				TargetPodIP:          DefaultTargetPodIp,
 				DryRun:               disruption.Spec.DryRun,
+				DisruptionUID:        string(disruption.UID),
 				DisruptionName:       disruption.Name,
 				DisruptionNamespace:  DefaultNamespace,
 				OnInit:               disruption.Spec.OnInit,
@@ -721,8 +721,6 @@ var _ = Describe("Chaos Pod Service", func() {
 				PulseDormantDuration: pulseDormantDuration,
 				MetricsSink:          DefaultMetricsSinkName,
 				AllowedHosts:         DefaultInjectorNetworkDisruptionAllowedHosts,
-				DNSServer:            DefaultInjectorDNSDisruptionDNSServer,
-				KubeDNS:              DefaultInjectorDNSDisruptionKubeDNS,
 				ChaosNamespace:       DefaultChaosNamespace,
 			}
 			metricsSinkMock.EXPECT().GetSinkName().Return(DefaultMetricsSinkName).Maybe()
@@ -744,7 +742,9 @@ var _ = Describe("Chaos Pod Service", func() {
 			args.Level = disruption.Spec.Level
 			args.TargetContainers = targetContainers
 			args.DryRun = disruption.Spec.DryRun
+			args.DisruptionUID = string(disruption.UID)
 			args.DisruptionName = disruption.Name
+			args.DisruptionNamespace = disruption.Namespace
 			args.OnInit = disruption.Spec.OnInit
 			args.NotInjectedBefore = notInjectedBefore
 
@@ -984,9 +984,9 @@ var _ = Describe("Chaos Pod Service", func() {
 
 		var chaosPodArgs []string
 
-		JustBeforeEach(func() {
+		JustBeforeEach(func(ctx SpecContext) {
 			// Action
-			chaosPodArgs = chaosPodService.GetPodInjectorArgs(chaosPod)
+			chaosPodArgs = chaosPodService.GetPodInjectorArgs(ctx, chaosPod)
 		})
 
 		Describe("success cases", func() {

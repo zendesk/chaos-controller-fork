@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 /*
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,6 +26,7 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Contains returns true when the given string is present in the given slice
@@ -61,4 +62,5 @@ type SetupWebhookWithManagerConfig struct {
 	CloudServicesProvidersManager    cloudservice.CloudServicesProvidersManager
 	Environment                      string
 	PermittedUserGroups              []string
+	APIReader                        client.Reader
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2022 The Ebitengine Authors
 
-//go:build darwin || freebsd || linux
+//go:build darwin || freebsd || linux || netbsd
 
 #include "textflag.h"
 #include "abi_amd64.h"
@@ -86,8 +86,16 @@ TEXT syscall15X(SB), NOSPLIT|NOFRAME, $0
 	CALL R10
 
 	MOVQ PTR_ADDRESS(BP), DI      // get the pointer back
-	MOVQ AX, syscall15Args_r1(DI) // r1
-	MOVQ X0, syscall15Args_r2(DI) // r2
+	MOVQ AX, syscall15Args_a1(DI) // r1
+	MOVQ DX, syscall15Args_a2(DI) // r3
+	MOVQ X0, syscall15Args_f1(DI) // f1
+	MOVQ X1, syscall15Args_f2(DI) // f2
+
+#ifdef GOOS_darwin
+    CALL purego_error(SB)
+    MOVD (AX), AX
+    MOVD AX, syscall15Args_a3(DI) // save errno
+#endif
 
 	XORL AX, AX          // no error (it's ignored anyway)
 	ADDQ $STACK_SIZE, SP
@@ -120,6 +128,9 @@ TEXT callbackasm1(SB), NOSPLIT|NOFRAME, $0
 
 	PUSHQ R10 // push the stack pointer below registers
 
+	// Switch from the host ABI to the Go ABI.
+	PUSH_REGS_HOST_TO_ABI0()
+
 	// determine index into runtime·cbs table
 	MOVQ $callbackasm(SB), DX
 	SUBQ DX, AX
@@ -127,9 +138,6 @@ TEXT callbackasm1(SB), NOSPLIT|NOFRAME, $0
 	MOVQ $5, CX               // divide by 5 because each call instruction in ·callbacks is 5 bytes long
 	DIVL CX
 	SUBQ $1, AX               // subtract 1 because return PC is to the next slot
-
-	// Switch from the host ABI to the Go ABI.
-	PUSH_REGS_HOST_TO_ABI0()
 
 	// Create a struct callbackArgs on our stack to be passed as
 	// the "frame" to cgocallback and on to callbackWrap.

@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package datadog
 
@@ -25,6 +25,9 @@ func New() Sink {
 	provider := ddotel.NewTracerProvider(
 		ddtracer.WithProfilerCodeHotspots(true),
 		ddtracer.WithLogStartup(false),
+		// Reports Go runtime metrics (e.g. heap, goroutines) to the Agent via DogStatsD (~10s interval).
+		// Ensure the Agent is reachable for metrics (DD_AGENT_HOST / DD_DOGSTATSD_PORT or UDS), same as for traces.
+		ddtracer.WithRuntimeMetrics(),
 	)
 
 	return Sink{provider: provider}

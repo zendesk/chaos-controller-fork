@@ -1,86 +1,371 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package v1beta1
 
 import (
-	"errors"
 	"fmt"
-	"regexp"
+	"net"
+	"strconv"
 	"strings"
 
 	"github.com/hashicorp/go-multierror"
 )
 
-// DNSDisruptionSpec represents a dns disruption
-type DNSDisruptionSpec []HostRecordPair
+// DNSDisruptionSpec represents a DNS resolution disruption with flexible record-based configuration
+type DNSDisruptionSpec struct {
+	// Records defines the list of DNS records to fake/disrupt
+	// +kubebuilder:validation:MinItems=1
+	Records []DNSRecord `json:"records" chaos_validate:"required,min=1,dive"`
 
-// HostRecordPair represents a hostname and a corresponding dns record override
-type HostRecordPair struct {
-	Hostname string    `json:"hostname"`
-	Record   DNSRecord `json:"record"`
+	// Port is the DNS port to intercept (optional, defaults to 53)
+	// +optional
+	Port int `json:"port,omitempty" chaos_validate:"omitempty,gte=1,lte=65535"`
+
+	// Protocol determines which DNS protocols to disrupt (optional, defaults to both)
+	// Supported values: udp, tcp, both
+	// +optional
+	Protocol string `json:"protocol,omitempty" chaos_validate:"omitempty,oneofci=udp tcp both"`
 }
 
-// DNSRecord represents a type of DNS Record, such as A or CNAME, and the value of that record
+// GetPortWithDefault returns the port to use, applying the default value of 53 if not specified
+func (s *DNSDisruptionSpec) GetPortWithDefault() int {
+	if s.Port == 0 {
+		return 53
+	}
+
+	return s.Port
+}
+
+// GetProtocolWithDefault returns the protocol to use, applying the default value of "both" if not specified
+func (s *DNSDisruptionSpec) GetProtocolWithDefault() string {
+	if s.Protocol == "" {
+		return "both"
+	}
+
+	return strings.ToLower(s.Protocol)
+}
+
+// DNSRecord represents a single DNS record to fake
 type DNSRecord struct {
-	Type  string `json:"type"`
-	Value string `json:"value"`
+	// Hostname is the domain name to intercept (e.g., "app.datadoghq.com")
+	Hostname string `json:"hostname" chaos_validate:"required"`
+	// Record defines the DNS record configuration to return
+	Record DNSRecordConfig `json:"record" chaos_validate:"required"`
 }
 
-// Validate validates that there are no missing hostnames or records for the given dns disruption spec
-func (s DNSDisruptionSpec) Validate() (retErr error) {
-	for _, pair := range s {
-		if pair.Hostname == "" {
-			retErr = multierror.Append(retErr, errors.New("no hostname specified in dns disruption"))
+// DNSRecordConfig defines the DNS record type and value to return
+type DNSRecordConfig struct {
+	// Type is the DNS record type
+	// Supported values: A, AAAA, CNAME, MX, TXT, SRV
+	Type string `json:"type" chaos_validate:"required,oneofci=A AAAA CNAME MX TXT SRV"`
+	// Value is the record value(s)
+	// For A: comma-separated IPv4 addresses or special values (NXDOMAIN, DROP, SERVFAIL, RANDOM)
+	// For AAAA: comma-separated IPv6 addresses or special values (NXDOMAIN, DROP, SERVFAIL, RANDOM)
+	// For CNAME: target hostname
+	// For MX: comma-separated "priority hostname" pairs (e.g., "10 mail.example.com,20 mail2.example.com")
+	// For TXT: text content
+	// For SRV: comma-separated "priority weight port target" tuples (e.g., "10 60 5060 sipserver.example.com")
+	Value string `json:"value" chaos_validate:"required"`
+	// TTL is the time-to-live for the record in seconds (optional, defaults to 0)
+	// +optional
+	TTL uint32 `json:"ttl,omitempty"`
+}
+
+// Validate validates args for the given disruption
+func (s *DNSDisruptionSpec) Validate() (retErr error) {
+	// Validate records
+	if err := s.validateRecords(); err != nil {
+		retErr = multierror.Append(retErr, err)
+	}
+
+	// Validate port if specified
+	if s.Port != 0 && (s.Port < 1 || s.Port > 65535) {
+		retErr = multierror.Append(retErr, fmt.Errorf("spec.dns.port must be between 1 and 65535"))
+	}
+
+	// Validate protocol if specified
+	if s.Protocol != "" {
+		validProtocols := []string{"udp", "tcp", "both"}
+		isValidProtocol := false
+		normalizedProtocol := strings.ToLower(s.Protocol)
+
+		for _, proto := range validProtocols {
+			if normalizedProtocol == proto {
+				isValidProtocol = true
+				break
+			}
 		}
 
-		if _, err := regexp.Compile(pair.Hostname); err != nil {
-			retErr = multierror.Append(retErr, fmt.Errorf("hostname \"%s\" not a valid regular expression: %w", pair.Hostname, err))
-		}
-
-		if pair.Record.Type != "A" && pair.Record.Type != "CNAME" {
-			retErr = multierror.Append(retErr, fmt.Errorf("invalid record type specified in dns disruption, must be A or CNAME but found: %s", pair.Record.Type))
-		}
-
-		if pair.Record.Value == "" {
-			retErr = multierror.Append(retErr, errors.New("no value specified for dns record in dns disruption"))
+		if !isValidProtocol {
+			retErr = multierror.Append(retErr,
+				fmt.Errorf("spec.dns.protocol must be one of: %s", strings.Join(validProtocols, ", ")))
 		}
 	}
 
-	return multierror.Prefix(retErr, "DNS:")
+	return retErr
+}
+
+// validateRecords validates the new record-based format
+func (s *DNSDisruptionSpec) validateRecords() (retErr error) {
+	if len(s.Records) == 0 {
+		retErr = multierror.Append(retErr, fmt.Errorf("spec.dns.records must contain at least one record"))
+		return retErr
+	}
+
+	// Track seen hostname+type combinations to detect duplicates
+	// Allow multiple record types for the same hostname (e.g., A and AAAA for dual-stack)
+	seenRecords := make(map[string]int)
+
+	for i, record := range s.Records {
+		// Validate hostname
+		if strings.TrimSpace(record.Hostname) == "" {
+			retErr = multierror.Append(retErr, fmt.Errorf("spec.dns.records[%d].hostname cannot be empty", i))
+		}
+
+		// Check for duplicate hostname+type combination (normalize the same way as the DNS responder)
+		normalizedHostname := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(record.Hostname), "."))
+		normalizedType := strings.ToUpper(strings.TrimSpace(record.Record.Type))
+		recordKey := normalizedHostname + "|" + normalizedType
+
+		if firstIndex, exists := seenRecords[recordKey]; exists {
+			retErr = multierror.Append(retErr,
+				fmt.Errorf("spec.dns.records[%d].hostname '%s' with type '%s' is duplicated (first seen at index %d)", i, record.Hostname, record.Record.Type, firstIndex))
+		} else {
+			seenRecords[recordKey] = i
+		}
+
+		// Validate record type (normalizedType already computed above)
+		validTypes := []string{"A", "AAAA", "CNAME", "MX", "TXT", "SRV"}
+		isValidType := false
+
+		for _, t := range validTypes {
+			if normalizedType == t {
+				isValidType = true
+
+				break
+			}
+		}
+
+		if !isValidType {
+			retErr = multierror.Append(retErr,
+				fmt.Errorf("spec.dns.records[%d].record.type must be one of: %s", i, strings.Join(validTypes, ", ")))
+
+			continue
+		}
+
+		// Validate value based on type
+		if err := s.validateRecordValue(i, record.Record.Type, record.Record.Value); err != nil {
+			retErr = multierror.Append(retErr, err)
+		}
+	}
+
+	return retErr
+}
+
+// validateRecordValue validates the value based on record type
+func (s *DNSDisruptionSpec) validateRecordValue(index int, recordType, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("spec.dns.records[%d].record.value cannot be empty", index)
+	}
+
+	normalizedType := strings.ToUpper(recordType)
+	upperValue := strings.ToUpper(strings.TrimSpace(value))
+
+	// Check for special values (valid for A and AAAA types)
+	specialValues := []string{"NXDOMAIN", "DROP", "SERVFAIL", "RANDOM"}
+	isSpecialValue := false
+
+	for _, special := range specialValues {
+		if upperValue == special {
+			isSpecialValue = true
+			break
+		}
+	}
+
+	switch normalizedType {
+	case "A":
+		if isSpecialValue {
+			return nil
+		}
+		// Validate comma-separated IPv4 addresses
+		ips := strings.Split(value, ",")
+
+		for _, ipStr := range ips {
+			ipStr = strings.TrimSpace(ipStr)
+			ip := net.ParseIP(ipStr)
+
+			if ip == nil || ip.To4() == nil {
+				return fmt.Errorf("spec.dns.records[%d].record.value: '%s' is not a valid IPv4 address or special value", index, ipStr)
+			}
+		}
+
+	case "AAAA":
+		if isSpecialValue {
+			return nil
+		}
+		// Validate comma-separated IPv6 addresses
+		ips := strings.Split(value, ",")
+
+		for _, ipStr := range ips {
+			ipStr = strings.TrimSpace(ipStr)
+			ip := net.ParseIP(ipStr)
+
+			if ip == nil || ip.To4() != nil {
+				return fmt.Errorf("spec.dns.records[%d].record.value: '%s' is not a valid IPv6 address or special value", index, ipStr)
+			}
+		}
+
+	case "CNAME":
+		// Just check it's not empty and not a special value
+		if isSpecialValue {
+			return fmt.Errorf("spec.dns.records[%d].record.value: special values not allowed for CNAME records", index)
+		}
+
+	case "MX":
+		if isSpecialValue {
+			return fmt.Errorf("spec.dns.records[%d].record.value: special values not allowed for MX records", index)
+		}
+		// Validate format: "priority hostname" pairs separated by commas
+		entries := strings.Split(value, ",")
+		for _, entry := range entries {
+			parts := strings.Fields(strings.TrimSpace(entry))
+			if len(parts) != 2 {
+				return fmt.Errorf("spec.dns.records[%d].record.value: MX record must be in format 'priority hostname' (e.g., '10 mail.example.com')", index)
+			}
+
+			if _, err := strconv.Atoi(parts[0]); err != nil {
+				return fmt.Errorf("spec.dns.records[%d].record.value: MX priority must be a number", index)
+			}
+		}
+
+	case "TXT":
+		if isSpecialValue {
+			return fmt.Errorf("spec.dns.records[%d].record.value: special values not allowed for TXT records", index)
+		}
+		// Any string is valid for TXT
+
+	case "SRV":
+		if isSpecialValue {
+			return fmt.Errorf("spec.dns.records[%d].record.value: special values not allowed for SRV records", index)
+		}
+		// Validate format: "priority weight port target" tuples separated by commas
+		entries := strings.Split(value, ",")
+		for _, entry := range entries {
+			parts := strings.Fields(strings.TrimSpace(entry))
+			if len(parts) != 4 {
+				return fmt.Errorf("spec.dns.records[%d].record.value: SRV record must be in format 'priority weight port target' (e.g., '10 60 5060 sipserver.example.com')", index)
+			}
+			// Validate priority, weight, and port are numbers
+			for i, field := range []string{"priority", "weight", "port"} {
+				if _, err := strconv.Atoi(parts[i]); err != nil {
+					return fmt.Errorf("spec.dns.records[%d].record.value: SRV %s must be a number", index, field)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // GenerateArgs generates injection pod arguments for the given spec
-func (s DNSDisruptionSpec) GenerateArgs() []string {
+func (s *DNSDisruptionSpec) GenerateArgs() []string {
 	args := []string{
 		"dns-disruption",
 	}
 
-	hostRecordPairArgs := []string{}
+	// Add records
+	if len(s.Records) > 0 {
+		// Format: hostname1:type1:value1:ttl1,hostname2:type2:value2:ttl2,...
+		var recordArgs []string
 
-	for _, pair := range s {
-		whiteSpaceCleanedIPList := strings.ReplaceAll(pair.Record.Value, " ", "")
-		arg := fmt.Sprintf("%s;%s;%s", pair.Hostname, pair.Record.Type, whiteSpaceCleanedIPList)
-		hostRecordPairArgs = append(hostRecordPairArgs, arg)
+		for _, record := range s.Records {
+			recordStr := fmt.Sprintf("%s:%s:%s:%d",
+				record.Hostname,
+				strings.ToUpper(record.Record.Type),
+				record.Record.Value,
+				record.Record.TTL,
+			)
+			recordArgs = append(recordArgs, recordStr)
+		}
+
+		args = append(args, "--records", strings.Join(recordArgs, ";"))
 	}
 
-	args = append(args, "--host-record-pairs")
+	// Add port (defaults to 53 if not specified)
+	args = append(args, "--port", fmt.Sprintf("%d", s.GetPortWithDefault()))
 
-	// Each value passed to --host-record-pairs should be of the form `hostname;type;value`, e.g.
-	// `foo.bar.svc.cluster.local;A;10.0.0.0,10.0.0.13`
-	args = append(args, strings.Split(strings.Join(hostRecordPairArgs, " --host-record-pairs "), " ")...)
+	// Add protocol (defaults to "both" if not specified)
+	args = append(args, "--protocol", s.GetProtocolWithDefault())
 
 	return args
 }
 
-func (s DNSDisruptionSpec) Explain() []string {
-	explanation := []string{"", "spec.dns will intercept DNS requests from the target, replacing the specified records:"}
+// Explain provides a human-readable explanation of what the disruption will do
+func (s *DNSDisruptionSpec) Explain() []string {
+	var explanation strings.Builder
 
-	for _, pair := range s {
-		explanation = append(explanation, fmt.Sprintf("DNS queries for %s will return an %s record with the value %s", pair.Hostname, pair.Record.Type, pair.Record.Value))
+	if len(s.Records) == 0 {
+		return []string{"", "No DNS records configured for disruption."}
 	}
 
-	return explanation
+	explanation.WriteString("spec.dns will manipulate DNS responses for the following records:\n\n")
+
+	for _, record := range s.Records {
+		fmt.Fprintf(&explanation, "• %s (%s record):\n", record.Hostname, strings.ToUpper(record.Record.Type))
+
+		upperValue := strings.ToUpper(strings.TrimSpace(record.Record.Value))
+
+		switch upperValue {
+		case "NXDOMAIN":
+			explanation.WriteString("  Returns NXDOMAIN (domain does not exist), causing immediate 'domain not found' errors.\n")
+		case "DROP":
+			explanation.WriteString("  Drops queries without response, causing timeout errors.\n")
+		case "SERVFAIL":
+			explanation.WriteString("  Returns SERVFAIL (server failure), indicating DNS server errors.\n")
+		case "RANDOM":
+			explanation.WriteString("  Returns a random/invalid IP address, causing connections to unreachable addresses.\n")
+		default:
+			switch strings.ToUpper(record.Record.Type) {
+			case "A":
+				ips := strings.Split(record.Record.Value, ",")
+				if len(ips) > 1 {
+					fmt.Fprintf(&explanation, "  Returns IPv4 addresses in round-robin: %s\n", record.Record.Value)
+				} else {
+					fmt.Fprintf(&explanation, "  Returns IPv4 address: %s\n", record.Record.Value)
+				}
+			case "AAAA":
+				ips := strings.Split(record.Record.Value, ",")
+				if len(ips) > 1 {
+					fmt.Fprintf(&explanation, "  Returns IPv6 addresses in round-robin: %s\n", record.Record.Value)
+				} else {
+					fmt.Fprintf(&explanation, "  Returns IPv6 address: %s\n", record.Record.Value)
+				}
+			case "CNAME":
+				fmt.Fprintf(&explanation, "  Returns CNAME pointing to: %s\n", record.Record.Value)
+			case "MX":
+				fmt.Fprintf(&explanation, "  Returns MX records: %s\n", record.Record.Value)
+			case "TXT":
+				fmt.Fprintf(&explanation, "  Returns TXT record: %s\n", record.Record.Value)
+			case "SRV":
+				fmt.Fprintf(&explanation, "  Returns SRV records: %s\n", record.Record.Value)
+			}
+		}
+
+		if record.Record.TTL > 0 {
+			fmt.Fprintf(&explanation, "  TTL: %d seconds\n", record.Record.TTL)
+		}
+
+		explanation.WriteString("\n")
+	}
+
+	port := s.GetPortWithDefault()
+	protocol := s.GetProtocolWithDefault()
+
+	fmt.Fprintf(&explanation, "The disruption will intercept DNS traffic on port %d using %s protocol(s).",
+		port, protocol)
+
+	return []string{"", explanation.String()}
 }

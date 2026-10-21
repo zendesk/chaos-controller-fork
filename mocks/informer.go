@@ -3,7 +3,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package mocks
 
@@ -81,6 +81,65 @@ func (_c *CacheInformerMock_AddEventHandler_Call) Return(_a0 cache.ResourceEvent
 }
 
 func (_c *CacheInformerMock_AddEventHandler_Call) RunAndReturn(run func(cache.ResourceEventHandler) (cache.ResourceEventHandlerRegistration, error)) *CacheInformerMock_AddEventHandler_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// AddEventHandlerWithOptions provides a mock function with given fields: handler, options
+func (_m *CacheInformerMock) AddEventHandlerWithOptions(handler cache.ResourceEventHandler, options cache.HandlerOptions) (cache.ResourceEventHandlerRegistration, error) {
+	ret := _m.Called(handler, options)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AddEventHandlerWithOptions")
+	}
+
+	var r0 cache.ResourceEventHandlerRegistration
+	var r1 error
+	if rf, ok := ret.Get(0).(func(cache.ResourceEventHandler, cache.HandlerOptions) (cache.ResourceEventHandlerRegistration, error)); ok {
+		return rf(handler, options)
+	}
+	if rf, ok := ret.Get(0).(func(cache.ResourceEventHandler, cache.HandlerOptions) cache.ResourceEventHandlerRegistration); ok {
+		r0 = rf(handler, options)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(cache.ResourceEventHandlerRegistration)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(cache.ResourceEventHandler, cache.HandlerOptions) error); ok {
+		r1 = rf(handler, options)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// CacheInformerMock_AddEventHandlerWithOptions_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'AddEventHandlerWithOptions'
+type CacheInformerMock_AddEventHandlerWithOptions_Call struct {
+	*mock.Call
+}
+
+// AddEventHandlerWithOptions is a helper method to define mock.On call
+//   - handler cache.ResourceEventHandler
+//   - options cache.HandlerOptions
+func (_e *CacheInformerMock_Expecter) AddEventHandlerWithOptions(handler interface{}, options interface{}) *CacheInformerMock_AddEventHandlerWithOptions_Call {
+	return &CacheInformerMock_AddEventHandlerWithOptions_Call{Call: _e.mock.On("AddEventHandlerWithOptions", handler, options)}
+}
+
+func (_c *CacheInformerMock_AddEventHandlerWithOptions_Call) Run(run func(handler cache.ResourceEventHandler, options cache.HandlerOptions)) *CacheInformerMock_AddEventHandlerWithOptions_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(cache.ResourceEventHandler), args[1].(cache.HandlerOptions))
+	})
+	return _c
+}
+
+func (_c *CacheInformerMock_AddEventHandlerWithOptions_Call) Return(_a0 cache.ResourceEventHandlerRegistration, _a1 error) *CacheInformerMock_AddEventHandlerWithOptions_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *CacheInformerMock_AddEventHandlerWithOptions_Call) RunAndReturn(run func(cache.ResourceEventHandler, cache.HandlerOptions) (cache.ResourceEventHandlerRegistration, error)) *CacheInformerMock_AddEventHandlerWithOptions_Call {
 	_c.Call.Return(run)
 	return _c
 }

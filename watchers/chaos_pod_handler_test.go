@@ -1,21 +1,23 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package watchers_test
 
 import (
 	"fmt"
 
-	"github.com/DataDog/chaos-controller/api/v1beta1"
-	"github.com/DataDog/chaos-controller/watchers"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"github.com/stretchr/testify/mock"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+
+	"github.com/DataDog/chaos-controller/api/v1beta1"
+	"github.com/DataDog/chaos-controller/watchers"
+	"github.com/stretchr/testify/mock"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("Chaos Pod watcher", func() {
@@ -96,12 +98,16 @@ var _ = Describe("Chaos Pod watcher", func() {
 					It("should send a warning event", func() {
 						expectEventType := v1beta1.Events[v1beta1.EventChaosPodFailedState].Type
 						expectEventMessage := fmt.Sprintf(v1beta1.Events[v1beta1.EventChaosPodFailedState].OnDisruptionTemplateMessage,
-							newPod,
+							newPod.Name,
 							v1.PodFailed,
 							"OutOfpods",
 						)
 
-						Eventually(eventRecorder.(*record.FakeRecorder).Events).Should(Receive(ContainSubstring(expectEventType), ContainSubstring(expectEventMessage)))
+						Eventually(eventRecorder.(*record.FakeRecorder).Events).Should(
+							Receive(And(
+								ContainSubstring(expectEventType),
+								ContainSubstring(expectEventMessage),
+							)))
 					})
 
 					It("should send the event once", func() {

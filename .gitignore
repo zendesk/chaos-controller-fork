@@ -7,6 +7,8 @@ bin/injector/ebpf
 bin/manager/manager*
 bin/handler/handler*
 bin/chaosli/chaosli*
+bin/tools/
+bin/protoc-include/
 chart/install.yaml
 dogfood/bin
 out
@@ -56,3 +58,8 @@ ebpf/builds/
 
 # DS_Store
 .DS_Store
+
+.envrc
+
+# Backup files
+*.backup

@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package command
 
@@ -15,8 +15,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/DataDog/chaos-controller/process"
 	"go.uber.org/zap"
+
+	"github.com/DataDog/chaos-controller/o11y/tags"
+	"github.com/DataDog/chaos-controller/process"
 )
 
 const (
@@ -49,6 +51,8 @@ type BackgroundCmd interface {
 	KeepAlive()
 	Stop() error
 	DryRun() bool
+	// Done returns a channel that is closed when the background process exits.
+	Done() <-chan struct{}
 }
 
 type cmd struct {
@@ -57,11 +61,11 @@ type cmd struct {
 }
 
 func (c *cmd) PID() int {
-	if c == nil || c.Cmd == nil || c.Cmd.Process == nil {
+	if c == nil || c.Cmd == nil || c.Process == nil {
 		return process.NotFoundProcessPID
 	}
 
-	return c.Cmd.Process.Pid
+	return c.Process.Pid
 }
 
 func (c *cmd) ExitCode() int {
@@ -69,7 +73,7 @@ func (c *cmd) ExitCode() int {
 		return NotFoundProcessExitCode
 	}
 
-	return c.Cmd.ProcessState.ExitCode()
+	return c.ProcessState.ExitCode()
 }
 
 func (c *cmd) DryRun() bool {
@@ -86,6 +90,7 @@ type backgroundCmd struct {
 	err            chan error      // Used to monitor the exit of the command
 	keepAliveQuit  chan int        // Used to kill the keepAlive goroutine
 	pid            int             // PID of the process
+	done           chan struct{}   // Closed when the process exits
 }
 
 type factory struct {
@@ -112,15 +117,17 @@ func (f factory) NewCmd(ctx context.Context, name string, args []string) Cmd {
 
 func NewBackgroundCmd(cmd Cmd, log *zap.SugaredLogger, processManager process.Manager) BackgroundCmd {
 	return &backgroundCmd{
-		cmd,
-		sync.Mutex{},
-		log,
-		processManager,
-		nil,
-		nil,
-		nil,
-		process.NotFoundProcessPID,
+		Cmd:            cmd,
+		log:            log,
+		processManager: processManager,
+		pid:            process.NotFoundProcessPID,
+		done:           make(chan struct{}),
 	}
+}
+
+// Done returns a channel that is closed when the background process exits.
+func (w *backgroundCmd) Done() <-chan struct{} {
+	return w.done
 }
 
 func (w *backgroundCmd) DryRun() bool {
@@ -129,17 +136,19 @@ func (w *backgroundCmd) DryRun() bool {
 
 func (w *backgroundCmd) Start() error {
 	if w.DryRun() {
+		close(w.done)
 		return nil
 	}
 
 	if err := w.Cmd.Start(); err != nil {
-		return fmt.Errorf("unable to exec command '%s': %w", w.Cmd.String(), err)
+		close(w.done)
+		return fmt.Errorf("unable to exec command '%s': %w", w.String(), err)
 	}
 
 	chErr := make(chan error, 1)
 
 	go func() {
-		chErr <- w.Cmd.Wait()
+		chErr <- w.Wait()
 	}()
 
 	// Here we want to provide a small time for command to bootstrap
@@ -148,27 +157,31 @@ func (w *backgroundCmd) Start() error {
 	case <-time.After(cmdBootstrapAllowedDuration):
 	case err := <-chErr:
 		if err != nil {
+			close(w.done)
 			return fmt.Errorf("an error occurred during startup of exec command: %w", err)
 		}
 	}
 
-	w.pid = w.Cmd.PID()
+	w.pid = w.PID()
 	if w.pid == process.NotFoundProcessPID {
-		return fmt.Errorf("no process created, processState exit code is %v", w.Cmd.ExitCode())
+		close(w.done)
+		return fmt.Errorf("no process created, processState exit code is %v", w.ExitCode())
 	}
 
 	w.err = chErr
-	w.log = w.log.With("pid", w.pid)
+	w.log = w.log.With(tags.PidKey, w.pid)
 
 	// Monitoring launched process in background to at least give visibility of exit
 	go func() {
 		w.log.Debug("new process created, monitoring newly created process exit status")
 
 		if err := <-w.err; err != nil {
-			w.log.Warnw("background command exited with an error", "error", err)
+			w.log.Warnw("background command exited with an error", tags.ErrorKey, err)
 		} else {
 			w.log.Info("background command exited successfully")
 		}
+
+		close(w.done)
 	}()
 
 	return nil
@@ -198,7 +211,7 @@ func (w *backgroundCmd) KeepAlive() {
 		for {
 			exit, err := w.sendSIGCONTSignal()
 			if err != nil {
-				w.log.Errorw("an error occurred when sending SIGCONT signal to process, stopping to monitor background process, ticker removed", "error", err)
+				w.log.Errorw("an error occurred when sending SIGCONT signal to process, stopping to monitor background process, ticker removed", tags.ErrorKey, err)
 				return
 			}
 
@@ -228,7 +241,7 @@ func (w *backgroundCmd) sendSIGCONTSignal() (exit bool, err error) {
 
 	proc, err := w.processManager.Find(w.pid)
 	if err != nil {
-		w.log.Errorw("an error occurred when trying to Find process, stopping to monitor background process, ticker removed", "error", err)
+		w.log.Errorw("an error occurred when trying to Find process, stopping to monitor background process, ticker removed", tags.ErrorKey, err)
 
 		w.resetTicker()
 
@@ -244,7 +257,7 @@ func (w *backgroundCmd) sendSIGCONTSignal() (exit bool, err error) {
 			return true, nil
 		}
 
-		w.log.Errorw("an error occurred when sending SIGCONT signal to process, stopping to monitor background process, ticker removed", "error", err)
+		w.log.Errorw("an error occurred when sending SIGCONT signal to process, stopping to monitor background process, ticker removed", tags.ErrorKey, err)
 
 		return false, err
 	}

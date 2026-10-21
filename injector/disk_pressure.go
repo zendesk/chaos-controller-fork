@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package injector
 
@@ -14,6 +14,7 @@ import (
 	"github.com/DataDog/chaos-controller/api/v1beta1"
 	"github.com/DataDog/chaos-controller/disk"
 	"github.com/DataDog/chaos-controller/env"
+	"github.com/DataDog/chaos-controller/o11y/tags"
 	"github.com/DataDog/chaos-controller/types"
 )
 
@@ -94,7 +95,7 @@ func (i *diskPressureInjector) Inject() error {
 			return fmt.Errorf("error throttling disk read: %w", err)
 		}
 
-		i.config.Log.Infow("read throttling injected", "device", i.config.Informer.Source(), "bps", *i.spec.Throttling.ReadBytesPerSec)
+		i.config.Log.Infow("read throttling injected", tags.DeviceKey, i.config.Informer.Source(), tags.BpsKey, *i.spec.Throttling.ReadBytesPerSec)
 	}
 
 	// add write throttle
@@ -103,7 +104,7 @@ func (i *diskPressureInjector) Inject() error {
 			return fmt.Errorf("error throttling disk write: %w", err)
 		}
 
-		i.config.Log.Infow("write throttling injected", "device", i.config.Informer.Source(), "bps", *i.spec.Throttling.WriteBytesPerSec)
+		i.config.Log.Infow("write throttling injected", tags.DeviceKey, i.config.Informer.Source(), tags.BpsKey, *i.spec.Throttling.WriteBytesPerSec)
 	}
 
 	return nil
@@ -115,14 +116,14 @@ func (i *diskPressureInjector) UpdateConfig(config Config) {
 
 func (i *diskPressureInjector) Clean() error {
 	// clean read throttle
-	i.config.Log.Infow("cleaning disk read throttle", "device", i.config.Informer.Source())
+	i.config.Log.Infow("cleaning disk read throttle", tags.DeviceKey, i.config.Informer.Source())
 
 	if err := i.config.Cgroup.Write(diskPressureBlkioControllerName, i.getThrottleFilename(diskPressureThrottleModeRead), i.formatThrottle(0, diskPressureThrottleModeRead)); err != nil {
 		return fmt.Errorf("error cleaning read disk throttle: %w", err)
 	}
 
 	// clean write throttle
-	i.config.Log.Infow("cleaning disk write throttle", "device", i.config.Informer.Source())
+	i.config.Log.Infow("cleaning disk write throttle", tags.DeviceKey, i.config.Informer.Source())
 
 	if err := i.config.Cgroup.Write(diskPressureBlkioControllerName, i.getThrottleFilename(diskPressureThrottleModeWrite), i.formatThrottle(0, diskPressureThrottleModeWrite)); err != nil {
 		return fmt.Errorf("error cleaning write disk throttle: %w", err)

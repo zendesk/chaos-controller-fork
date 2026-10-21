@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package injector
 
@@ -45,8 +45,8 @@ func NewDiskFailureInjector(spec v1beta1.DiskFailureSpec, config DiskFailureInje
 
 	if config.BPFConfigInformer == nil {
 		var err error
-		config.BPFConfigInformer, err = ebpf.NewConfigInformer(config.Log, config.Disruption.DryRun, nil, nil, nil)
 
+		config.BPFConfigInformer, err = ebpf.NewConfigInformer(config.Log, config.Disruption.DryRun, nil, nil, nil)
 		if err != nil {
 			return nil, fmt.Errorf("could not create an instance of eBPF config informer for the disk failure disruption: %w", err)
 		}
@@ -77,7 +77,7 @@ func (i *DiskFailureInjector) Inject() error {
 
 	pid := 0
 	if i.config.Disruption.Level == types.DisruptionLevelPod {
-		pid = int(i.config.Config.TargetContainer.PID())
+		pid = int(i.config.TargetContainer.PID())
 	}
 
 	exitCode := 0

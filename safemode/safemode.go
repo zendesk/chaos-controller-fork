@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package safemode
 
@@ -58,10 +58,10 @@ func AddAllSafemodeObjects(disruption v1beta1.Disruption, k8sClient client.Clien
 		safemodeList = append(safemodeList, &safemodeCPU)
 	}
 
-	if disruption.Spec.DNS != nil {
-		safemodeDNS := DNS{}
-		safemodeDNS.Init(disruption, k8sClient)
-		safemodeList = append(safemodeList, &safemodeDNS)
+	if disruption.Spec.MemoryPressure != nil {
+		safemodeMemory := Memory{}
+		safemodeMemory.Init(disruption, k8sClient)
+		safemodeList = append(safemodeList, &safemodeMemory)
 	}
 
 	if disruption.Spec.GRPC != nil {
@@ -74,6 +74,12 @@ func AddAllSafemodeObjects(disruption v1beta1.Disruption, k8sClient client.Clien
 		safemodeNode := Node{}
 		safemodeNode.Init(disruption, k8sClient)
 		safemodeList = append(safemodeList, &safemodeNode)
+	}
+
+	if disruption.Spec.DNS != nil {
+		safemodeDNS := DNS{}
+		safemodeDNS.Init(disruption, k8sClient)
+		safemodeList = append(safemodeList, &safemodeDNS)
 	}
 
 	return safemodeList

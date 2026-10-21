@@ -1,7 +1,7 @@
 # Unless explicitly stated otherwise all files in this repository are licensed
 # under the Apache License Version 2.0.
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
-# Copyright 2025 Datadog, Inc.
+# Copyright 2026 Datadog, Inc.
 
 ---
 variables:
@@ -10,21 +10,48 @@ variables:
   INJECTOR_IMAGE_NAME: chaos-injector
   HANDLER_IMAGE_NAME: chaos-handler
   SLACK_NOTIFIER_IMAGE: "registry.ddbuild.io/slack-notifier:v27627802-caa0581-sdm-gbi-focal@sha256:0b8ace5ad00b7be5e8430c5685c2a9b657a6e32f92c826102557146f0095adf5"
+  # Increase CPU and memory resources to speed up the build
+  KUBERNETES_CPU_REQUEST: "4"
+  KUBERNETES_CPU_LIMIT: "4"
+
+# Default retry policy for transient failures
+default:
+  retry:
+    max: 1
+    when:
+      - unknown_failure
+      - data_integrity_failure
+      - runner_system_failure
+      - scheduler_failure
+      - api_failure
 
 stages:
+  - check
   - build
   - release-staging
   - release-prod
   - release-public
   - notify
 
+check-lockfile:
+  stage: check
+  image: registry.ddbuild.io/images/mirror/ubuntu:24.04
+  tags: ["arch:amd64"]
+  script:
+    - apt-get update && apt-get install -y --no-install-recommends python3 python3-pip git ca-certificates
+    - python3 -m pip install uv --break-system-packages
+    - uv pip compile --python-platform linux tasks/requirements.in -o tasks/requirements.txt.tmp
+    - grep -v '^#' tasks/requirements.txt > tasks/requirements.txt.no-comments
+    - grep -v '^#' tasks/requirements.txt.tmp > tasks/requirements.txt.tmp.no-comments
+    - diff tasks/requirements.txt.no-comments tasks/requirements.txt.tmp.no-comments
+
 .install-make: &install-make
   - apt-get update
-  - apt-get install -y --no-install-recommends build-essential git
+  - apt-get install -y --no-install-recommends make
 
 .docker-runner: &docker-runner
   image: registry.ddbuild.io/docker-push:1.7.0
-  tags: ["runner:docker"]
+  tags: ["arch:amd64"]
 
 # login into Docker Hub -- allows to not get rate-limited on releases
 .docker-hub-login: &docker-hub-login
@@ -41,17 +68,10 @@ build:make:
   when: always
   script:
     - *install-make
-    - export PATH="/usr/local/go/bin:${PATH}"
-    - make GOBIN=/usr/local/go/bin install-go all docker-build-ebpf_arm docker-build-ebpf_amd
-  artifacts:
-    paths:
-      - bin/manager/manager_amd64
-      - bin/manager/manager_arm64
-      - bin/injector/injector_amd64
-      - bin/injector/injector_arm64
-      - bin/handler/handler_amd64
-      - bin/handler/handler_arm64
-      - bin/injector/ebpf/*
+    - >
+      make docker-build-only-all \
+          CONTAINER_BUILD_EXTRA_ARGS='-t $$(CONTAINER_NAME):$(CONTAINER_VERSION)'" --platform=linux/amd64,linux/arm64 --label target=${TARGET_LABEL}" \
+          SKIP_GENERATE=true
 
 # build the target from the local Dockerfile and push it to the registry
 # replication will depend on the TARGET_LABEL set by parent job
@@ -62,15 +82,15 @@ build:make:
     DDSIGN_ID_TOKEN:
       aud: image-integrity
   script:
-    - docker buildx create --use
     - *install-make
     - >
       make docker-build-only-all \
-        CONTAINER_REGISTRY=registry.ddbuild.io \
-        CONTAINER_TAG=${TAG} \
-        CONTAINER_VERSION=${CI_COMMIT_SHA} \
-        CONTAINER_BUILD_EXTRA_ARGS='-t $$(CONTAINER_NAME):$(CONTAINER_VERSION)'" --platform=linux/amd64,linux/arm64 --label target=${TARGET_LABEL} --push" \
-        SIGN_IMAGE=true
+          CONTAINER_REGISTRY=registry.ddbuild.io \
+          CONTAINER_TAG=${TAG} \
+          CONTAINER_VERSION=${CI_COMMIT_SHA} \
+          CONTAINER_BUILD_EXTRA_ARGS='-t $$(CONTAINER_NAME):$(CONTAINER_VERSION)'" --platform=linux/amd64,linux/arm64 --label target=${TARGET_LABEL} --push" \
+          SIGN_IMAGE=true \
+          SKIP_GENERATE=true
   dependencies:
     - build:make
 
@@ -88,10 +108,13 @@ build:make:
 release-staging-ref:
   <<: *release-staging
   rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
     - if: $CI_COMMIT_TAG
       when: never
     - if: $CI_COMMIT_BRANCH =~ /^.*-staging$/
       when: on_success
+      allow_failure: true
     - when: manual
       allow_failure: true
   variables:
@@ -100,9 +123,12 @@ release-staging-ref:
 
 release-prod-ref:
   <<: *release-prod
-  when: manual
-  except:
-    - tags
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+      when: always
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: manual
   variables:
     TARGET_LABEL: "prod"
     TAG: "${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
@@ -130,9 +156,8 @@ release-prod-tag:
 .release-docker-hub: &release-docker-hub
   <<: *docker-hub-login
   stage: release-public
-  tags: ["runner:docker"]
+  tags: ["arch:amd64"]
   script:
-    - docker buildx create --use
     - *install-make
     - >
       make docker-build-only-all \
@@ -140,7 +165,8 @@ release-prod-tag:
         CONTAINER_TAG=${TAG} \
         CONTAINER_VERSION=${CI_COMMIT_SHA} \
         CONTAINER_BUILD_EXTRA_ARGS="--platform=linux/amd64,linux/arm64 --label target=${TARGET_LABEL} --push" \
-        SIGN_IMAGE=false
+        SIGN_IMAGE=false \
+        SKIP_GENERATE=true
   dependencies:
     - build:make
 
@@ -163,7 +189,7 @@ release-docker-hub-tag:
 
 # Slack Notify
 .slack-notifier-base:
-  tags: ["runner:main", "size:large"]
+  tags: ["arch:amd64"]
   image: $SLACK_NOTIFIER_IMAGE
   allow_failure: true
   when: on_failure
@@ -183,7 +209,7 @@ slack-notifier-build.on-failure:
 
 .slack-notifier-release-staging: &slack-notifier-release-staging
   image: $SLACK_NOTIFIER_IMAGE
-  tags: ["runner:main"]
+  tags: ["arch:amd64"]
   stage: notify
   only:
     - /^.*-staging$/

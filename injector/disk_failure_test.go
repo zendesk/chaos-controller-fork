@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package injector_test
 
@@ -266,6 +266,27 @@ var _ = Describe("Disk Failure", func() {
 					It("should start with a valid exit code", func() {
 						Expect(err).ShouldNot(HaveOccurred())
 
+						cmdFactoryMock.AssertCalled(GinkgoT(), "NewCmd", mock.Anything, EBPFDiskFailureCmd, []string{
+							"-process", strconv.Itoa(0),
+							"-path", "/",
+							"-probability", "100",
+						})
+					})
+				})
+
+				Context("with dry run mode enabled", func() {
+					BeforeEach(func() {
+						config.Disruption.DryRun = true
+					})
+
+					It("should validate eBPF capabilities and start successfully", func() {
+						Expect(err).ShouldNot(HaveOccurred())
+
+						// Verify that validation still occurs in dry run mode since bpftool probe is read-only
+						BPFConfigInformerMock.AssertCalled(GinkgoT(), "ValidateRequiredSystemConfig")
+						BPFConfigInformerMock.AssertCalled(GinkgoT(), "GetMapTypes")
+
+						// Verify that the command was still created
 						cmdFactoryMock.AssertCalled(GinkgoT(), "NewCmd", mock.Anything, EBPFDiskFailureCmd, []string{
 							"-process", strconv.Itoa(0),
 							"-path", "/",

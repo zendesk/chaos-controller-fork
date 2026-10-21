@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package watchers_test
 
@@ -35,11 +35,11 @@ var _ = Describe("Watcher factory", func() {
 		readerMock        mocks.ReaderMock
 		watcherFactory    watchers.Factory
 		watcher           watchers.Watcher
-		cacheMock         *CacheMock
+		cacheMock         *mocks.CacheCacheMock
 	)
 
 	BeforeEach(func() {
-		cacheMock = &CacheMock{}
+		cacheMock = mocks.NewCacheCacheMock(GinkgoT())
 	})
 
 	JustBeforeEach(func() {
@@ -160,7 +160,7 @@ var _ = Describe("Watcher factory", func() {
 
 			It("should return an error", func() {
 				Expect(err).Should(HaveOccurred())
-				Expect(err.Error()).Should(HavePrefix("could not create the name disruption target watcher. Error: error getting instance selector"))
+				Expect(err.Error()).Should(HavePrefix("could not create the name disruption target watcher:"))
 			})
 		})
 	})
