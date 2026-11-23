@@ -3,7 +3,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package network
 
@@ -26,29 +26,29 @@ func (_m *DNSClientMock) EXPECT() *DNSClientMock_Expecter {
 	return &DNSClientMock_Expecter{mock: &_m.Mock}
 }
 
-// Resolve provides a mock function with given fields: host
-func (_m *DNSClientMock) Resolve(host string) ([]net.IP, error) {
-	ret := _m.Called(host)
+// ResolveWithStrategy provides a mock function with given fields: host, strategy
+func (_m *DNSClientMock) ResolveWithStrategy(host string, strategy string) ([]net.IP, error) {
+	ret := _m.Called(host, strategy)
 
 	if len(ret) == 0 {
-		panic("no return value specified for Resolve")
+		panic("no return value specified for ResolveWithStrategy")
 	}
 
 	var r0 []net.IP
 	var r1 error
-	if rf, ok := ret.Get(0).(func(string) ([]net.IP, error)); ok {
-		return rf(host)
+	if rf, ok := ret.Get(0).(func(string, string) ([]net.IP, error)); ok {
+		return rf(host, strategy)
 	}
-	if rf, ok := ret.Get(0).(func(string) []net.IP); ok {
-		r0 = rf(host)
+	if rf, ok := ret.Get(0).(func(string, string) []net.IP); ok {
+		r0 = rf(host, strategy)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]net.IP)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string) error); ok {
-		r1 = rf(host)
+	if rf, ok := ret.Get(1).(func(string, string) error); ok {
+		r1 = rf(host, strategy)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -56,30 +56,31 @@ func (_m *DNSClientMock) Resolve(host string) ([]net.IP, error) {
 	return r0, r1
 }
 
-// DNSClientMock_Resolve_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'Resolve'
-type DNSClientMock_Resolve_Call struct {
+// DNSClientMock_ResolveWithStrategy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ResolveWithStrategy'
+type DNSClientMock_ResolveWithStrategy_Call struct {
 	*mock.Call
 }
 
-// Resolve is a helper method to define mock.On call
+// ResolveWithStrategy is a helper method to define mock.On call
 //   - host string
-func (_e *DNSClientMock_Expecter) Resolve(host interface{}) *DNSClientMock_Resolve_Call {
-	return &DNSClientMock_Resolve_Call{Call: _e.mock.On("Resolve", host)}
+//   - strategy string
+func (_e *DNSClientMock_Expecter) ResolveWithStrategy(host interface{}, strategy interface{}) *DNSClientMock_ResolveWithStrategy_Call {
+	return &DNSClientMock_ResolveWithStrategy_Call{Call: _e.mock.On("ResolveWithStrategy", host, strategy)}
 }
 
-func (_c *DNSClientMock_Resolve_Call) Run(run func(host string)) *DNSClientMock_Resolve_Call {
+func (_c *DNSClientMock_ResolveWithStrategy_Call) Run(run func(host string, strategy string)) *DNSClientMock_ResolveWithStrategy_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(string), args[1].(string))
 	})
 	return _c
 }
 
-func (_c *DNSClientMock_Resolve_Call) Return(_a0 []net.IP, _a1 error) *DNSClientMock_Resolve_Call {
+func (_c *DNSClientMock_ResolveWithStrategy_Call) Return(_a0 []net.IP, _a1 error) *DNSClientMock_ResolveWithStrategy_Call {
 	_c.Call.Return(_a0, _a1)
 	return _c
 }
 
-func (_c *DNSClientMock_Resolve_Call) RunAndReturn(run func(string) ([]net.IP, error)) *DNSClientMock_Resolve_Call {
+func (_c *DNSClientMock_ResolveWithStrategy_Call) RunAndReturn(run func(string, string) ([]net.IP, error)) *DNSClientMock_ResolveWithStrategy_Call {
 	_c.Call.Return(run)
 	return _c
 }

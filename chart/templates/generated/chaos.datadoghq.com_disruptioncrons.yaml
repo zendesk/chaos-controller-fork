@@ -2,7 +2,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.14.0
+    controller-gen.kubebuilder.io/version: v0.19.0
   name: disruptioncrons.chaos.datadoghq.com
 spec:
   group: chaos.datadoghq.com
@@ -72,6 +72,7 @@ spec:
                             items:
                               type: string
                             type: array
+                            x-kubernetes-list-type: atomic
                         required:
                           - key
                           - operator
@@ -180,29 +181,60 @@ spec:
                         - throttling
                       type: object
                     dns:
-                      description: DNSDisruptionSpec represents a dns disruption
-                      items:
-                        description: HostRecordPair represents a hostname and a corresponding dns record override
-                        properties:
-                          hostname:
-                            type: string
-                          record:
-                            description: DNSRecord represents a type of DNS Record, such as A or CNAME, and the value of that record
-                            properties:
-                              type:
-                                type: string
-                              value:
-                                type: string
-                            required:
-                              - type
-                              - value
-                            type: object
-                        required:
-                          - hostname
-                          - record
-                        type: object
+                      description: DNSDisruptionSpec represents a DNS resolution disruption with flexible record-based configuration
                       nullable: true
-                      type: array
+                      properties:
+                        port:
+                          description: Port is the DNS port to intercept (optional, defaults to 53)
+                          type: integer
+                        protocol:
+                          description: |-
+                            Protocol determines which DNS protocols to disrupt (optional, defaults to both)
+                            Supported values: udp, tcp, both
+                          type: string
+                        records:
+                          description: Records defines the list of DNS records to fake/disrupt
+                          items:
+                            description: DNSRecord represents a single DNS record to fake
+                            properties:
+                              hostname:
+                                description: Hostname is the domain name to intercept (e.g., "app.datadoghq.com")
+                                type: string
+                              record:
+                                description: Record defines the DNS record configuration to return
+                                properties:
+                                  ttl:
+                                    description: TTL is the time-to-live for the record in seconds (optional, defaults to 0)
+                                    format: int32
+                                    type: integer
+                                  type:
+                                    description: |-
+                                      Type is the DNS record type
+                                      Supported values: A, AAAA, CNAME, MX, TXT, SRV
+                                    type: string
+                                  value:
+                                    description: |-
+                                      Value is the record value(s)
+                                      For A: comma-separated IPv4 addresses or special values (NXDOMAIN, DROP, SERVFAIL, RANDOM)
+                                      For AAAA: comma-separated IPv6 addresses or special values (NXDOMAIN, DROP, SERVFAIL, RANDOM)
+                                      For CNAME: target hostname
+                                      For MX: comma-separated "priority hostname" pairs (e.g., "10 mail.example.com,20 mail2.example.com")
+                                      For TXT: text content
+                                      For SRV: comma-separated "priority weight port target" tuples (e.g., "10 60 5060 sipserver.example.com")
+                                    type: string
+                                required:
+                                  - type
+                                  - value
+                                type: object
+                            required:
+                              - hostname
+                              - record
+                            type: object
+                          minItems: 1
+                          type: array
+                      required:
+                        - records
+                      type: object
                     dryRun:
                       type: boolean
                     duration:
@@ -271,6 +303,27 @@ spec:
                         - pod
                         - node
                       type: string
+                    maxRuns:
+                      description: |-
+                        MaxRuns specifies the maximum number of times the disruption should be executed
+                        After this many runs, the disruption will become idle (default: unlimited for continuous disruptions)
+                      minimum: 1
+                      type: integer
+                    memoryPressure:
+                      description: MemoryPressureSpec represents a memory pressure disruption
+                      nullable: true
+                      properties:
+                        rampDuration:
+                          description: |-
+                            Duration over which memory is gradually consumed (e.g., "10m")
+                            If empty, memory is consumed immediately
+                          type: string
+                        targetPercent:
+                          description: Target memory utilization as a percentage (e.g., "76%")
+                          type: string
+                      required:
+                        - targetPercent
+                      type: object
                     network:
                       description: NetworkDisruptionSpec represents a network disruption injection
                       nullable: true
@@ -284,6 +337,14 @@ spec:
                                   - est
                                   - ""
                                 type: string
+                              dnsResolver:
+                                enum:
+                                  - pod
+                                  - node
+                                  - pod-fallback-node
+                                  - node-fallback-pod
+                                  - ""
+                                type: string
                               flow:
                                 enum:
                                   - ingress
@@ -292,6 +353,10 @@ spec:
                                 type: string
                               host:
                                 type: string
+                              percentage:
+                                maximum: 100
+                                minimum: 1
+                                type: integer
                               port:
                                 maximum: 65535
                                 minimum: 0
@@ -424,6 +489,14 @@ spec:
                                   - est
                                   - ""
                                 type: string
+                              dnsResolver:
+                                enum:
+                                  - pod
+                                  - node
+                                  - pod-fallback-node
+                                  - node-fallback-pod
+                                  - ""
+                                type: string
                               flow:
                                 enum:
                                   - ingress
@@ -432,6 +505,10 @@ spec:
                                 type: string
                               host:
                                 type: string
+                              percentage:
+                                maximum: 100
+                                minimum: 1
+                                type: integer
                               port:
                                 maximum: 65535
                                 minimum: 0
@@ -465,6 +542,10 @@ spec:
                                 type: string
                               namespace:
                                 type: string
+                              percentage:
+                                maximum: 100
+                                minimum: 1
+                                type: integer
                               ports:
                                 items:
                                   properties:
@@ -492,6 +573,24 @@ spec:
                       type: object
                     onInit:
                       type: boolean
+                    podReplacement:
+                      description: PodReplacementSpec represents a pod replacement disruption
+                      nullable: true
+                      properties:
+                        deleteStorage:
+                          default: true
+                          description: DeleteStorage determines if PVCs associated with the target pod should be deleted
+                          type: boolean
+                        forceDelete:
+                          description: ForceDelete forces deletion of stuck pods by setting grace period to 0
+                          type: boolean
+                        gracePeriodSeconds:
+                          description: |-
+                            GracePeriodSeconds specifies the grace period for pod deletion in seconds
+                            If not specified, uses the pod's default grace period
+                          format: int64
+                          type: integer
+                      type: object
                     pulse:
                       description: DisruptionPulse contains the active disruption duration and the dormant disruption duration
                       nullable: true

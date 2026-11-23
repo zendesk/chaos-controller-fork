@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package api
 
@@ -13,7 +13,7 @@ import (
 	chaostypes "github.com/DataDog/chaos-controller/types"
 )
 
-// DisruptionKind contains all methods required for a disruption sub-specification (Network, DNS, CPUPressure, etc.)
+// DisruptionKind contains all methods required for a disruption sub-specification (Network, CPUPressure, etc.)
 type DisruptionKind interface {
 	// generates CLI args for the given disruption sub-specification
 	GenerateArgs() []string
@@ -31,10 +31,9 @@ type DisruptionArgs struct {
 	MetricsSink          string
 	DisruptionName       string
 	DisruptionNamespace  string
+	DisruptionUID        string
 	TargetName           string
 	TargetNodeName       string
-	DNSServer            string
-	KubeDNS              string
 	ChaosNamespace       string
 	DryRun               bool
 	OnInit               bool
@@ -65,6 +64,7 @@ func (d DisruptionArgs) CreateCmdArgs(args []string) []string {
 		// log context args
 		"--log-context-disruption-name", d.DisruptionName,
 		"--log-context-disruption-namespace", d.DisruptionNamespace,
+		"--log-context-disruption-uid", d.DisruptionUID,
 		"--log-context-target-name", d.TargetName,
 		"--log-context-target-node-name", d.TargetNodeName,
 	)
@@ -90,12 +90,6 @@ func (d DisruptionArgs) CreateCmdArgs(args []string) []string {
 
 	if !d.NotInjectedBefore.IsZero() {
 		args = append(args, "--not-injected-before", d.NotInjectedBefore.Format(time.RFC3339))
-	}
-
-	// DNS disruption configs
-	if d.Kind == chaostypes.DisruptionKindDNSDisruption {
-		args = append(args, "--dns-server", d.DNSServer)
-		args = append(args, "--kube-dns", d.KubeDNS)
 	}
 
 	// append allowed hosts for network disruptions

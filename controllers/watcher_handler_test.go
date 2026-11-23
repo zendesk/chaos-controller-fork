@@ -1,20 +1,22 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package controllers
 
 import (
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"github.com/DataDog/chaos-controller/api/v1beta1"
-	chaostypes "github.com/DataDog/chaos-controller/types"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/DataDog/chaos-controller/api/v1beta1"
+	tagutil "github.com/DataDog/chaos-controller/o11y/tags"
+	chaostypes "github.com/DataDog/chaos-controller/types"
+
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 var _ = Describe("Cache Handler", func() {
@@ -98,7 +100,9 @@ func allNamespaceEvents(ctx SpecContext) []corev1.Event {
 
 	items := []corev1.Event{}
 	for {
-		Eventually(k8sClient.List).
+		// Use APIReader instead of cached client for pagination support
+		// https://github.com/kubernetes-sigs/controller-runtime/issues/3044
+		Eventually(APIReader.List).
 			WithContext(ctx).WithArguments(&eventList, &opts).
 			Within(k8sAPIServerResponseTimeout).ProbeEvery(k8sAPIPotentialChangesEvery).
 			Should(Succeed())
@@ -119,11 +123,11 @@ func findEvent(eventKey v1beta1.EventReason, events []corev1.Event, involvedObje
 
 	for _, event := range events {
 		if toFind.Reason.MatchEventReason(event) && event.Type == toFind.Type && event.Source.Component == string(v1beta1.SourceDisruptionComponent) && event.InvolvedObject.Name == involvedObjectName {
-			log.Infow("MATCHED", "event", event)
+			log.Infow("MATCHED", tagutil.EventKey, event)
 			return event
 		} else {
 			log.Infof("event: %s | %s %s %s %v", event.Reason, event.InvolvedObject.Name, event.Type, event.Source.Component, event.LastTimestamp.Time)
-			log.Infow("NOT_MATCHED", "event", event, "to_find", toFind)
+			log.Infow("NOT_MATCHED", tagutil.EventKey, event, tagutil.ToFindKey, toFind)
 		}
 	}
 

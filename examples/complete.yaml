@@ -1,7 +1,7 @@
 # Unless explicitly stated otherwise all files in this repository are licensed
 # under the Apache License Version 2.0.
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
-# Copyright 2025 Datadog, Inc.
+# Copyright 2026 Datadog, Inc.
 
 apiVersion: chaos.datadoghq.com/v1beta1
 kind: Disruption
@@ -20,13 +20,13 @@ spec:
     minNotificationType: Info # optional, minimal notification type to be notified, default is Success, available options are Info, Success, Warning, Error
   level: pod # level the disruption should be injected at (can be either pod or node, defaults to pod)
   selector: # label selector[s] to target pods
-    app: demo
+    service: demo
     team: developer
   filter:
     annotations:
       aws-zone: us-east-1b # filter selected targets to only those with this annotation
   advancedSelector: # advanced selectors can select targets on something else than an exact key/value match
-    - key: app
+    - key: service
       operator: Exists
   # - key: app
   #   operator: DoesNotExist
@@ -57,35 +57,41 @@ spec:
         protocol: tcp # optional, protocol to drop packets on (can be tcp or udp, defaults to both)
         flow: ingress # optional, flow direction (egress: outgoing traffic, ingress: incoming traffic, defaults to egress)
         connState: new # optional, connection state (new: new connections, est: established connections, defaults to all states)
+        dnsResolver: pod-fallback-node # optional, DNS resolution strategy (pod, node, pod-fallback-node, node-fallback-pod), defaults to pod-fallback-node. Use 'node' to bypass service mesh DNS proxies like Istio
+        percentage: 30 # optional, percentage (1-100) of resolved IPs to target for this host, useful for testing partial unavailability scenarios
     allowedHosts: # optional, list of excluded hosts which would not be disrupted
       - host: 10.0.0.1 # optional, IP, CIDR or hostname to filter on
         port: 80 # optional, port to filter on
         protocol: tcp # optional, protocol to filter on (can be tcp or udp, defaults to both)
         flow: ingress # optional, flow direction (egress: outgoing traffic, ingress: incoming traffic, defaults to egress)
         connState: new # optional, connection state (new: new connections, est: established connections, defaults to all states)
+        dnsResolver: pod-fallback-node # optional, DNS resolution strategy (pod, node, pod-fallback-node, node-fallback-pod), defaults to pod-fallback-node. Use 'node' to bypass service mesh DNS proxies like Istio
+        percentage: 50 # optional, percentage (1-100) of resolved IPs to exclude from disruption, useful for maintaining partial connectivity to critical services
     services: # optional, list of destination Kubernetes services to filter on. These must be in the same kubernetes cluster
       - name: foo # service name
         namespace: bar # service namespace
+        percentage: 30 # optional, percentage (1-100) of service endpoints to target, useful for testing partial service unavailability
       - name: fooo # service name
         namespace: barr # service namespace
         ports: # optional, list of the service ports to drop packets on. Empty list means dropping to all ports of the service
           - 8080
           - 8081
-    aws:
-      - service: "S3" # service name as declared in the provider file (see doc for details)
-        protocol: tcp # optional, protocol to drop packets on (can be tcp or udp, defaults to both)
-        flow: ingress # optional, flow direction (egress: outgoing traffic, ingress: incoming traffic, defaults to egress)
-        connState: new # optional, connection state (new: new connections, est: established connections, defaults to all states)
-    gcp:
-      - service: "Google" # service name as declared in the provider file (see doc for details)
-        protocol: tcp # optional, protocol to drop packets on (can be tcp or udp, defaults to both)
-        flow: ingress # optional, flow direction (egress: outgoing traffic, ingress: incoming traffic, defaults to egress)
-        connState: new # optional, connection state (new: new connections, est: established connections, defaults to all states)
-    datadog:
-      - service: "synthetics" # service name as declared in the provider file (see doc for details)
-        protocol: tcp # optional, protocol to drop packets on (can be tcp or udp, defaults to both)
-        flow: ingress # optional, flow direction (egress: outgoing traffic, ingress: incoming traffic, defaults to egress)
-        connState: new # optional, connection state (new: new connections, est: established connections, defaults to all states)
+    cloud:
+      aws:
+        - service: "S3" # service name as declared in the provider file (see doc for details)
+          protocol: tcp # optional, protocol to drop packets on (can be tcp or udp, defaults to both)
+          flow: ingress # optional, flow direction (egress: outgoing traffic, ingress: incoming traffic, defaults to egress)
+          connState: new # optional, connection state (new: new connections, est: established connections, defaults to all states)
+      gcp:
+        - service: "Google" # service name as declared in the provider file (see doc for details)
+          protocol: tcp # optional, protocol to drop packets on (can be tcp or udp, defaults to both)
+          flow: ingress # optional, flow direction (egress: outgoing traffic, ingress: incoming traffic, defaults to egress)
+          connState: new # optional, connection state (new: new connections, est: established connections, defaults to all states)
+      datadog:
+        - service: "synthetics" # service name as declared in the provider file (see doc for details)
+          protocol: tcp # optional, protocol to drop packets on (can be tcp or udp, defaults to both)
+          flow: ingress # optional, flow direction (egress: outgoing traffic, ingress: incoming traffic, defaults to egress)
+          connState: new # optional, connection state (new: new connections, est: established connections, defaults to all states)
     http: # http filters
       methods:
         - GET # http method to filter on
@@ -97,20 +103,14 @@ spec:
     delayJitter: 5 # add X % (1-100) of delay as jitter to delay (+- X% ms to original delay), defaults to 10%
     bandwidthLimit: 10000 # bandwidth limit in bytes
   cpuPressure: {} # cpu load generator
+  memoryPressure: # memory load generator
+    targetPercent: "50%" # percentage of available memory to consume (e.g. "50%")
+    rampDuration: 10m # optional, duration over which to gradually reach targetPercent
   diskPressure: # disk pressure
     path: /mnt/data # mount point (in the pod) to apply throttle on
     throttling:
       readBytesPerSec: 1024 # optional, read throttling in bytes per sec
       writeBytesPerSec: 2048 # optional, write throttling in bytes per sec
-  dns: # disrupt DNS resolutions by faking results
-    - hostname: foo.bar.svc.cluster.local # record hostname which should be faked
-      record:
-        type: A # return an A record
-        value: 10.0.0.154,10.0.0.13 # list of IPs to return (will be round-robined)
-    - hostname: datadoghq.com # record hostname which should be faked
-      record:
-        type: CNAME # return a CNAME record
-        value: google.com # hostname to return
   grpc: # disrupt gRPC responses by faking results
     port: 50051 # port that target grpc server is listening on
     endpoints:

@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package v1beta1
 
@@ -58,6 +58,10 @@ type DisruptionSpec struct {
 	// +nullable
 	Pulse    *DisruptionPulse   `json:"pulse,omitempty"`    // enable pulsing diruptions and specify the duration of the active state and the dormant state of the pulsing duration
 	Duration DisruptionDuration `json:"duration,omitempty"` // time from disruption creation until chaos pods are deleted and no more are created
+	// MaxRuns specifies the maximum number of times the disruption should be executed
+	// After this many runs, the disruption will become idle (default: unlimited for continuous disruptions)
+	// +kubebuilder:validation:Minimum=1
+	MaxRuns *int `json:"maxRuns,omitempty"`
 	// Level defines what the disruption will target, either a pod or a node
 	// +kubebuilder:default=pod
 	// +kubebuilder:validation:Enum=pod;node
@@ -72,13 +76,17 @@ type DisruptionSpec struct {
 	// +nullable
 	CPUPressure *CPUPressureSpec `json:"cpuPressure,omitempty"`
 	// +nullable
+	MemoryPressure *MemoryPressureSpec `json:"memoryPressure,omitempty"`
+	// +nullable
 	DiskPressure *DiskPressureSpec `json:"diskPressure,omitempty"`
 	// +nullable
 	DiskFailure *DiskFailureSpec `json:"diskFailure,omitempty"`
 	// +nullable
-	DNS DNSDisruptionSpec `json:"dns,omitempty"`
-	// +nullable
 	GRPC *GRPCDisruptionSpec `json:"grpc,omitempty"`
+	// +nullable
+	DNS *DNSDisruptionSpec `json:"dns,omitempty"`
+	// +nullable
+	PodReplacement *PodReplacementSpec `json:"podReplacement,omitempty"`
 	// +nullable
 	Reporting *Reporting `json:"reporting,omitempty"`
 }
@@ -292,6 +300,8 @@ type DisruptionStatus struct {
 	// timestamp of when a disruption has been cleaned last.
 	// +nullable
 	CleanedAt *metav1.Time `json:"cleanedAt,omitempty"`
+	// Number of times the disruption has been executed (chaos pods created)
+	RunCount int `json:"runCount,omitempty"`
 }
 
 type DisruptionFilter struct {
@@ -316,15 +326,15 @@ type Disruption struct {
 
 // TimeToInject calculates the time at which the disruption should be injected based on its own creationTimestamp.
 // It considers the specified triggers for injection timing in the disruption's specification.
-func (r *Disruption) TimeToInject() time.Time {
-	triggers := r.Spec.Triggers
+func (d *Disruption) TimeToInject() time.Time {
+	triggers := d.Spec.Triggers
 
 	if triggers == nil || triggers.IsZero() {
-		return r.CreationTimestamp.Time
+		return d.CreationTimestamp.Time
 	}
 
 	if triggers.Inject.IsZero() {
-		return r.TimeToCreatePods()
+		return d.TimeToCreatePods()
 	}
 
 	var notInjectedBefore time.Time
@@ -336,11 +346,11 @@ func (r *Disruption) TimeToInject() time.Time {
 
 	if triggers.Inject.Offset.Duration() > 0 {
 		// We measure the offset from the latter of two timestamps: creationTimestamp of the disruption, and spec.triggers.createPods
-		notInjectedBefore = r.TimeToCreatePods().Add(triggers.Inject.Offset.Duration())
+		notInjectedBefore = d.TimeToCreatePods().Add(triggers.Inject.Offset.Duration())
 	}
 
-	if r.CreationTimestamp.Time.After(notInjectedBefore) {
-		return r.CreationTimestamp.Time
+	if d.CreationTimestamp.After(notInjectedBefore) {
+		return d.CreationTimestamp.Time
 	}
 
 	return notInjectedBefore
@@ -348,15 +358,15 @@ func (r *Disruption) TimeToInject() time.Time {
 
 // TimeToCreatePods takes the DisruptionTriggers field from a Disruption spec, along with the time.Time at which that disruption was created
 // It returns the earliest time.Time at which the chaos-controller should begin creating chaos pods, given the specified DisruptionTriggers
-func (r *Disruption) TimeToCreatePods() time.Time {
-	triggers := r.Spec.Triggers
+func (d *Disruption) TimeToCreatePods() time.Time {
+	triggers := d.Spec.Triggers
 
 	if triggers == nil || triggers.IsZero() {
-		return r.CreationTimestamp.Time
+		return d.CreationTimestamp.Time
 	}
 
 	if triggers.CreatePods.IsZero() {
-		return r.CreationTimestamp.Time
+		return d.CreationTimestamp.Time
 	}
 
 	var noPodsBefore time.Time
@@ -367,25 +377,25 @@ func (r *Disruption) TimeToCreatePods() time.Time {
 	}
 
 	if triggers.CreatePods.Offset.Duration() > 0 {
-		noPodsBefore = r.CreationTimestamp.Add(triggers.CreatePods.Offset.Duration())
+		noPodsBefore = d.CreationTimestamp.Add(triggers.CreatePods.Offset.Duration())
 	}
 
-	if r.CreationTimestamp.After(noPodsBefore) {
-		return r.CreationTimestamp.Time
+	if d.CreationTimestamp.After(noPodsBefore) {
+		return d.CreationTimestamp.Time
 	}
 
 	return noPodsBefore
 }
 
 // RemainingDuration return the remaining duration of the disruption.
-func (r *Disruption) RemainingDuration() time.Duration {
-	return r.calculateDeadline(
-		r.Spec.Duration.Duration(),
-		r.TimeToInject(),
+func (d *Disruption) RemainingDuration() time.Duration {
+	return d.calculateDeadline(
+		d.Spec.Duration.Duration(),
+		d.TimeToInject(),
 	)
 }
 
-func (r *Disruption) calculateDeadline(duration time.Duration, creationTime time.Time) time.Duration {
+func (d *Disruption) calculateDeadline(duration time.Duration, creationTime time.Time) time.Duration {
 	// first we must calculate the timeout from when the disruption was created, not from now
 	timeout := creationTime.Add(duration)
 	now := time.Now() // rather not take the risk that the time changes by a second during this function
@@ -395,21 +405,21 @@ func (r *Disruption) calculateDeadline(duration time.Duration, creationTime time
 }
 
 // TerminationStatus determines the termination status of a disruption based on various factors.
-func (r *Disruption) TerminationStatus(chaosPods []corev1.Pod) TerminationStatus {
+func (d *Disruption) TerminationStatus(chaosPods []corev1.Pod) TerminationStatus {
 	// a not yet created disruption is neither temporarily nor definitively ended
-	if r.CreationTimestamp.IsZero() {
+	if d.CreationTimestamp.IsZero() {
 		return TSNotTerminated
 	}
 
 	// a definitive state (expired duration or deletion) imply a definitively deleted injection
 	// and should be returned prior to a temporarily terminated state
-	if r.RemainingDuration() <= 0 || !r.DeletionTimestamp.IsZero() {
+	if d.RemainingDuration() <= 0 || !d.DeletionTimestamp.IsZero() {
 		return TSDefinitivelyTerminated
 	}
 
 	if len(chaosPods) == 0 {
 		// we were never injected, we are hence not terminated if we reach here
-		if r.Status.InjectionStatus.NeverInjected() {
+		if d.Status.InjectionStatus.NeverInjected() {
 			return TSNotTerminated
 		}
 
@@ -437,58 +447,58 @@ func (r *Disruption) TerminationStatus(chaosPods []corev1.Pod) TerminationStatus
 // // is a percentage string value it's treated as a percentage and scaled appropriately
 // // in accordance to the total, if it's an int value it's treated as a simple value and
 // // if it is a string value which is either non-numeric or numeric but lacking a trailing '%' it returns an error.
-func (r *Disruption) GetTargetsCountAsInt(targetTotal int, roundUp bool) (int, error) {
-	if r.Spec.Count == nil {
+func (d *Disruption) GetTargetsCountAsInt(targetTotal int, roundUp bool) (int, error) {
+	if d.Spec.Count == nil {
 		return 0, apierrors.NewBadRequest("nil value for IntOrString")
 	}
 
-	return intstr.GetScaledValueFromIntOrPercent(r.Spec.Count, targetTotal, roundUp)
+	return intstr.GetScaledValueFromIntOrPercent(d.Spec.Count, targetTotal, roundUp)
 }
 
 // IsDeletionExpired checks if a Disruption resource has exceeded a specified deletion timeout duration
 // for deletion. It returns true if the resource should be considered deleted based on
 // the DeletionTimestamp and the deletion timeout duration.
-func (r *Disruption) IsDeletionExpired(deletionTimeout time.Duration) bool {
-	if r.DeletionTimestamp.IsZero() {
+func (d *Disruption) IsDeletionExpired(deletionTimeout time.Duration) bool {
+	if d.DeletionTimestamp.IsZero() {
 		return false
 	}
 
-	return time.Now().After(r.DeletionTimestamp.Add(deletionTimeout))
+	return time.Now().After(d.DeletionTimestamp.Add(deletionTimeout))
 }
 
 // IsReadyToRemoveFinalizer checks if a disruption has been cleaned and has waited for finalizerDelay duration before removing finalizer
-func (r *Disruption) IsReadyToRemoveFinalizer(finalizerDelay time.Duration) bool {
-	return r.Status.CleanedAt != nil && time.Now().After(r.Status.CleanedAt.Add(finalizerDelay))
+func (d *Disruption) IsReadyToRemoveFinalizer(finalizerDelay time.Duration) bool {
+	return d.Status.CleanedAt != nil && time.Now().After(d.Status.CleanedAt.Add(finalizerDelay))
 }
 
 // CopyOwnerAnnotations copies the annotations from the owner object to the disruption.
 // This ensures that any important metadata from the owner, such as custom annotations,
 // is preserved in the newly created disruption.
-func (r *Disruption) CopyOwnerAnnotations(owner metav1.Object) {
-	if r.Annotations == nil {
-		r.Annotations = make(map[string]string)
+func (d *Disruption) CopyOwnerAnnotations(owner metav1.Object) {
+	if d.Annotations == nil {
+		d.Annotations = make(map[string]string)
 	}
 
 	ownerAnnotations := owner.GetAnnotations()
 	for k, v := range ownerAnnotations {
-		r.Annotations[k] = v
+		d.Annotations[k] = v
 	}
 }
 
 // SetScheduledAtAnnotation sets the scheduled time of the disruption in the annotations.
-func (r *Disruption) SetScheduledAtAnnotation(scheduledTime time.Time) {
-	if r.Annotations == nil {
-		r.Annotations = make(map[string]string)
+func (d *Disruption) SetScheduledAtAnnotation(scheduledTime time.Time) {
+	if d.Annotations == nil {
+		d.Annotations = make(map[string]string)
 	}
 
 	scheduledAt := scheduledTime.Format(time.RFC3339)
-	r.Annotations[chaostypes.ScheduledAtAnnotation] = scheduledAt
+	d.Annotations[chaostypes.ScheduledAtAnnotation] = scheduledAt
 }
 
 // GetScheduledAtAnnotation retrieves the scheduled time from the disruption's annotations.
 // Returns an error if the annotation is not found or cannot be parsed.
-func (r *Disruption) GetScheduledAtAnnotation() (time.Time, error) {
-	scheduledAt, exists := r.Annotations[chaostypes.ScheduledAtAnnotation]
+func (d *Disruption) GetScheduledAtAnnotation() (time.Time, error) {
+	scheduledAt, exists := d.Annotations[chaostypes.ScheduledAtAnnotation]
 	if !exists {
 		return time.Time{}, errors.New("scheduledAt annotation not found")
 	}
@@ -504,9 +514,9 @@ func (r *Disruption) GetScheduledAtAnnotation() (time.Time, error) {
 // CopyUserInfoToAnnotations copies the user-related annotations from the owner object to the disruption.
 // Any UserInfo annotations will be overwritten when the Disruption is created, so this function ensures
 // that the parent resource's user information is preserved by storing it in separate annotations.
-func (r *Disruption) CopyUserInfoToAnnotations(owner metav1.Object) error {
-	if r.Annotations == nil {
-		r.Annotations = make(map[string]string)
+func (d *Disruption) CopyUserInfoToAnnotations(owner metav1.Object) error {
+	if d.Annotations == nil {
+		d.Annotations = make(map[string]string)
 	}
 
 	ownerAnnotations := owner.GetAnnotations()
@@ -517,8 +527,8 @@ func (r *Disruption) CopyUserInfoToAnnotations(owner metav1.Object) error {
 		}
 
 		// Set user-related annotations using the parsed UserInfo struct
-		r.Annotations[chaostypes.UserAnnotation] = userInfo.Username
-		r.Annotations[chaostypes.UserGroupsAnnotation] = strings.Join(userInfo.Groups, ",")
+		d.Annotations[chaostypes.UserAnnotation] = userInfo.Username
+		d.Annotations[chaostypes.UserGroupsAnnotation] = strings.Join(userInfo.Groups, ",")
 	}
 
 	return nil
@@ -686,36 +696,44 @@ func (s DisruptionSpec) validateGlobalDisruptionScope(requireSelectors bool) (re
 	}
 
 	// Rule: At least one disruption kind must be applied
-	if s.CPUPressure == nil && s.DiskPressure == nil && s.DiskFailure == nil && s.Network == nil && s.GRPC == nil && s.ContainerFailure == nil && s.NodeFailure == nil && len(s.DNS) == 0 {
+	if s.CPUPressure == nil && s.MemoryPressure == nil && s.DiskPressure == nil && s.DiskFailure == nil && s.Network == nil && s.GRPC == nil && s.DNS == nil && s.ContainerFailure == nil && s.NodeFailure == nil && s.PodReplacement == nil {
 		retErr = multierror.Append(retErr, errors.New("at least one disruption kind must be specified, please read the docs to see your options"))
 	}
 
-	// Rule: ContainerFailure and NodeFailure disruptions are not compatible with other failure types
+	// Rule: ContainerFailure, NodeFailure, and PodReplacement disruptions are not compatible with other failure types
 	if s.ContainerFailure != nil {
-		if s.CPUPressure != nil || s.DiskPressure != nil || s.DiskFailure != nil || s.Network != nil || s.GRPC != nil || s.NodeFailure != nil || len(s.DNS) > 0 {
+		if s.CPUPressure != nil || s.MemoryPressure != nil || s.DiskPressure != nil || s.DiskFailure != nil || s.Network != nil || s.GRPC != nil || s.DNS != nil || s.NodeFailure != nil || s.PodReplacement != nil {
 			retErr = multierror.Append(retErr, errors.New("container failure disruptions are not compatible with other disruption kinds. The container failure will remove the impact of the other disruption types"))
 		}
 	}
 
 	if s.NodeFailure != nil {
-		if s.CPUPressure != nil || s.DiskPressure != nil || s.DiskFailure != nil || s.Network != nil || s.GRPC != nil || s.ContainerFailure != nil || len(s.DNS) > 0 {
+		if s.CPUPressure != nil || s.MemoryPressure != nil || s.DiskPressure != nil || s.DiskFailure != nil || s.Network != nil || s.GRPC != nil || s.DNS != nil || s.ContainerFailure != nil || s.PodReplacement != nil {
 			retErr = multierror.Append(retErr, errors.New("node failure disruptions are not compatible with other disruption kinds. The node failure will remove the impact of the other disruption types"))
+		}
+	}
+
+	if s.PodReplacement != nil {
+		if s.CPUPressure != nil || s.MemoryPressure != nil || s.DiskPressure != nil || s.DiskFailure != nil || s.Network != nil || s.GRPC != nil || s.DNS != nil || s.ContainerFailure != nil || s.NodeFailure != nil {
+			retErr = multierror.Append(retErr, errors.New("pod replacement disruptions are not compatible with other disruption kinds. The pod replacement will remove the impact of the other disruption types"))
+		}
+		// Rule: container failure not possible if disruption is node-level
+		if s.Level == chaostypes.DisruptionLevelNode {
+			retErr = multierror.Append(retErr, errors.New("cannot execute a pod replacement because the level configuration is set to node"))
 		}
 	}
 
 	// Rule: on init compatibility
 	if s.OnInit {
 		if s.CPUPressure != nil ||
+			s.MemoryPressure != nil ||
 			s.NodeFailure != nil ||
+			s.PodReplacement != nil ||
 			s.ContainerFailure != nil ||
 			s.DiskPressure != nil ||
 			s.GRPC != nil ||
 			s.DiskFailure != nil {
-			retErr = multierror.Append(retErr, errors.New("OnInit is only compatible with network and dns disruptions"))
-		}
-
-		if s.DNS != nil && len(s.Containers) > 0 {
-			retErr = multierror.Append(retErr, errors.New("OnInit is only compatible on dns disruptions with no subset of targeted containers"))
+			retErr = multierror.Append(retErr, errors.New("OnInit is only compatible with network disruptions"))
 		}
 
 		if s.Level != chaostypes.DisruptionLevelPod {
@@ -730,6 +748,11 @@ func (s DisruptionSpec) validateGlobalDisruptionScope(requireSelectors bool) (re
 	// Rule: No specificity of containers on a disk disruption
 	if len(s.Containers) != 0 && s.DiskPressure != nil {
 		retErr = multierror.Append(retErr, errors.New("disk pressure disruptions apply to all containers, specifying certain containers does not isolate the disruption"))
+	}
+
+	// Rule: No specificity of containers on a memory disruption
+	if len(s.Containers) != 0 && s.MemoryPressure != nil {
+		retErr = multierror.Append(retErr, errors.New("memory pressure disruptions apply to all containers, specifying certain containers does not isolate the disruption"))
 	}
 
 	// Rule: DisruptionTrigger
@@ -756,8 +779,8 @@ func (s DisruptionSpec) validateGlobalDisruptionScope(requireSelectors bool) (re
 	// Rule: pulse compatibility
 	if s.Pulse != nil {
 		if s.Pulse.ActiveDuration.Duration() > 0 || s.Pulse.DormantDuration.Duration() > 0 {
-			if s.NodeFailure != nil || s.ContainerFailure != nil {
-				retErr = multierror.Append(retErr, errors.New("pulse is only compatible with network, cpu pressure, disk pressure, dns and grpc disruptions"))
+			if s.NodeFailure != nil || s.PodReplacement != nil || s.ContainerFailure != nil {
+				retErr = multierror.Append(retErr, errors.New("pulse is only compatible with network, cpu pressure, memory pressure, disk pressure, dns, and grpc disruptions"))
 			}
 		}
 
@@ -776,6 +799,10 @@ func (s DisruptionSpec) validateGlobalDisruptionScope(requireSelectors bool) (re
 
 	if s.GRPC != nil && s.Level == chaostypes.DisruptionLevelNode {
 		retErr = multierror.Append(retErr, errors.New("GRPC disruptions can only be applied at the pod level"))
+	}
+
+	if s.DNS != nil && s.Level == chaostypes.DisruptionLevelNode {
+		retErr = multierror.Append(retErr, errors.New("DNS disruptions can only be applied at the pod level"))
 	}
 
 	// Rule: count must be valid
@@ -805,12 +832,16 @@ func (s DisruptionSpec) DisruptionKindPicker(kind chaostypes.DisruptionKindName)
 		disruptionKind = s.Network
 	case chaostypes.DisruptionKindCPUPressure:
 		disruptionKind = s.CPUPressure
+	case chaostypes.DisruptionKindMemoryPressure:
+		disruptionKind = s.MemoryPressure
 	case chaostypes.DisruptionKindDiskPressure:
 		disruptionKind = s.DiskPressure
-	case chaostypes.DisruptionKindDNSDisruption:
-		disruptionKind = s.DNS
 	case chaostypes.DisruptionKindGRPCDisruption:
 		disruptionKind = s.GRPC
+	case chaostypes.DisruptionKindDNSDisruption:
+		disruptionKind = s.DNS
+	case chaostypes.DisruptionKindPodReplacement:
+		disruptionKind = s.PodReplacement
 	case chaostypes.DisruptionKindDiskFailure:
 		disruptionKind = s.DiskFailure
 	}
@@ -867,11 +898,11 @@ func (s DisruptionSpec) DisruptionCount() int {
 		count++
 	}
 
-	if s.ContainerFailure != nil {
+	if s.MemoryPressure != nil {
 		count++
 	}
 
-	if s.DNS != nil {
+	if s.ContainerFailure != nil {
 		count++
 	}
 
@@ -888,6 +919,10 @@ func (s DisruptionSpec) DisruptionCount() int {
 	}
 
 	if s.NodeFailure != nil {
+		count++
+	}
+
+	if s.PodReplacement != nil {
 		count++
 	}
 
@@ -913,6 +948,7 @@ func (s DisruptionSpec) Explain() []string {
 	}
 
 	var explanation []string
+
 	explanation = append(explanation, "Here's our best explanation of what this spec will do when run:")
 
 	durationExpl := s.Duration.Duration().String()
@@ -1022,6 +1058,10 @@ func (s DisruptionSpec) Explain() []string {
 		explanation = append(explanation, s.NodeFailure.Explain()...)
 	}
 
+	if s.PodReplacement != nil {
+		explanation = append(explanation, s.PodReplacement.Explain()...)
+	}
+
 	if s.ContainerFailure != nil {
 		explanation = append(explanation, s.ContainerFailure.Explain()...)
 	}
@@ -1034,16 +1074,16 @@ func (s DisruptionSpec) Explain() []string {
 		explanation = append(explanation, s.CPUPressure.Explain()...)
 	}
 
+	if s.MemoryPressure != nil {
+		explanation = append(explanation, s.MemoryPressure.Explain()...)
+	}
+
 	if s.DiskPressure != nil {
 		explanation = append(explanation, s.DiskPressure.Explain()...)
 	}
 
 	if s.DiskFailure != nil {
 		explanation = append(explanation, s.DiskFailure.Explain()...)
-	}
-
-	if s.DNS != nil {
-		explanation = append(explanation, s.DNS.Explain()...)
 	}
 
 	if s.GRPC != nil {
@@ -1110,6 +1150,7 @@ func (status *DisruptionStatus) HasTarget(searchTarget string) bool {
 var NonReinjectableDisruptions = map[chaostypes.DisruptionKindName]struct{}{
 	chaostypes.DisruptionKindGRPCDisruption: {},
 	chaostypes.DisruptionKindNodeFailure:    {},
+	chaostypes.DisruptionKindPodReplacement: {},
 }
 
 func DisruptionIsNotReinjectable(kind chaostypes.DisruptionKindName) bool {
@@ -1122,6 +1163,7 @@ func DisruptionIsNotReinjectable(kind chaostypes.DisruptionKindName) bool {
 // the chaos pod. So once the chaos pod is gone, there's nothing left for us to clean.
 var NoSideEffectDisruptions = map[chaostypes.DisruptionKindName]struct{}{
 	chaostypes.DisruptionKindNodeFailure:      {},
+	chaostypes.DisruptionKindPodReplacement:   {},
 	chaostypes.DisruptionKindContainerFailure: {},
 }
 
@@ -1177,7 +1219,7 @@ func TargetedContainers(pod corev1.Pod, containerNames []string) (map[string]str
 		if containerID, existsInPod := allContainers[containerName]; existsInPod {
 			targetedContainers[containerName] = containerID
 		} else {
-			return nil, fmt.Errorf("could not find specified container in pod (pod: %s, targetContainer: %s)", pod.ObjectMeta.Name, containerName)
+			return nil, fmt.Errorf("could not find specified container in pod (pod: %s, targetContainer: %s)", pod.Name, containerName)
 		}
 	}
 

@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package types
 
@@ -77,10 +77,16 @@ const (
 	DisruptionKindDiskFailure = "disk-failure"
 	// DisruptionKindDiskPressure is a disk pressure disruption
 	DisruptionKindDiskPressure = "disk-pressure"
-	// DisruptionKindDNSDisruption is a dns disruption
-	DisruptionKindDNSDisruption = "dns-disruption"
 	// DisruptionKindGRPCDisruption is a grpc disruption
 	DisruptionKindGRPCDisruption = "grpc-disruption"
+	// DisruptionKindPodReplacement is a pod replacement disruption
+	DisruptionKindPodReplacement = "pod-replacement"
+	// DisruptionKindMemoryPressure is a memory pressure disruption
+	DisruptionKindMemoryPressure = "memory-pressure"
+	// DisruptionKindMemoryStress is a memory pressure sub-disruption that stress a single container
+	DisruptionKindMemoryStress = "memory-pressure-stress"
+	// DisruptionKindDNSDisruption is a DNS disruption
+	DisruptionKindDNSDisruption = "dns-disruption"
 
 	// DisruptionLevelPod is a disruption injected at the pod level
 	DisruptionLevelPod DisruptionLevel = "pod"
@@ -139,7 +145,6 @@ const (
 	InjectorPadDuration = 2 * time.Second
 
 	// InjectorCgroupClassID is linked to the TC tree in the injector network disruption.
-	// Also used in the DNS Disruption to allow combined Network + DNS Disruption
 	// This value should NEVER be changed without changing the Network Disruption TC tree.
 	InjectorCgroupClassID = "0x00020002"
 )
@@ -154,8 +159,10 @@ var DisruptionKindNames = []DisruptionKindName{
 	DisruptionKindNodeFailure,
 	DisruptionKindContainerFailure,
 	DisruptionKindCPUPressure,
+	DisruptionKindMemoryPressure,
 	DisruptionKindDiskPressure,
 	DisruptionKindDiskFailure,
-	DisruptionKindDNSDisruption,
 	DisruptionKindGRPCDisruption,
+	DisruptionKindDNSDisruption,
+	DisruptionKindPodReplacement,
 }

@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package v1beta1
 
@@ -52,7 +52,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 		Describe("success cases", func() {
 			When("the controller is not in delete-only mode", func() {
-				It("should send an EventDisruptionCronCreated event to the broadcast", func() {
+				It("should send an EventDisruptionCronCreated event to the broadcast", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					disruptionCronJSON, err := json.Marshal(disruptionCron)
@@ -64,11 +64,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 					By("sending the EventDisruptionCronCreated event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronCreated].Type, string(EventDisruptionCronCreated), Events[EventDisruptionCronCreated].OnDisruptionTemplateMessage)
+					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronCreated].Type, string(EventDisruptionCronCreated), "%s", Events[EventDisruptionCronCreated].OnDisruptionTemplateMessage)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateCreate()
+					warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -86,7 +86,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 				})
 
 				When("the userinfo is in the permitted user groups", func() {
-					It("should send an EventDisruptionCronCreated event to the broadcast", func() {
+					It("should send an EventDisruptionCronCreated event to the broadcast", func(ctx SpecContext) {
 						// Arrange
 						disruptionCron := makeValidDisruptionCron()
 						Expect(disruptionCron.SetUserInfo(authV1.UserInfo{
@@ -103,11 +103,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 						By("sending the EventDisruptionCronCreated event to the broadcast")
 						mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-						mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronCreated].Type, string(EventDisruptionCronCreated), Events[EventDisruptionCronCreated].OnDisruptionTemplateMessage)
+						mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronCreated].Type, string(EventDisruptionCronCreated), "%s", Events[EventDisruptionCronCreated].OnDisruptionTemplateMessage)
 						disruptionCronWebhookRecorder = mockEventRecorder
 
 						// Act
-						warnings, err := disruptionCron.ValidateCreate()
+						warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 						// Assert
 						Expect(warnings).To(BeNil())
@@ -119,7 +119,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("spec.delayedStartTolerance is set", func() {
-				It("should send an EventDisruptionCronCreated event to the broadcast", func() {
+				It("should send an EventDisruptionCronCreated event to the broadcast", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					disruptionCron.Spec.DelayedStartTolerance = DisruptionDuration("1s")
@@ -133,11 +133,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 					By("sending the EventDisruptionCronCreated event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronCreated].Type, string(EventDisruptionCronCreated), Events[EventDisruptionCronCreated].OnDisruptionTemplateMessage)
+					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronCreated].Type, string(EventDisruptionCronCreated), "%s", Events[EventDisruptionCronCreated].OnDisruptionTemplateMessage)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateCreate()
+					warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -148,7 +148,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("the disruption template duration is greater than 0", func() {
-				It("should validate the disruption cron successfully", func() {
+				It("should validate the disruption cron successfully", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					disruptionCron.Spec.DisruptionTemplate.Duration = "1s"
@@ -168,13 +168,14 @@ var _ = Describe("DisruptionCron Webhook", func() {
 							expectedAnnotation,
 							Events[EventDisruptionCronCreated].Type,
 							string(EventDisruptionCronCreated),
+							"%s",
 							Events[EventDisruptionCronCreated].OnDisruptionTemplateMessage,
 						)
 
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateCreate()
+					warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -185,17 +186,18 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 		Describe("error cases", func() {
 			When("the controller is in delete-only mode", func() {
-				It("returns an error", func() {
+				It("returns an error", func(ctx SpecContext) {
 					// Arrange
 					disruptionCronWebhookDeleteOnly = true
 
 					By("not emit an event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.AssertNotCalled(GinkgoT(), "AnnotatedEventf", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+					mockEventRecorder.AssertNotCalled(GinkgoT(), "AnnotatedEventf", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := (&DisruptionCron{}).ValidateCreate()
+					emptyDisruptionCron := &DisruptionCron{}
+					warnings, err := emptyDisruptionCron.ValidateCreate(ctx, emptyDisruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -205,13 +207,13 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			DescribeTable("should return an error when disruption cron name is invalid",
-				func(name, expectedError string) {
+				func(ctx SpecContext, name, expectedError string) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					disruptionCron.Name = name
 
 					// Act
-					warnings, err := disruptionCron.ValidateCreate()
+					warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -224,13 +226,13 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			)
 
 			When("disruption cron schedule is invalid", func() {
-				It("should return an error", func() {
+				It("should return an error", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					disruptionCron.Spec.Schedule = "****"
 
 					// Act
-					warnings, err := disruptionCron.ValidateCreate()
+					warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -240,11 +242,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("disruption cron schedule is too brief", func() {
-				It("should return an error", func() {
+				It("should return an error", func(ctx SpecContext) {
 					minimumCronFrequency = time.Hour * 24 * 365
 
 					disruptionCron := makeValidDisruptionCron()
-					warnings, err := disruptionCron.ValidateCreate()
+					warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 					Expect(warnings).To(BeNil())
 					Expect(err).Should(HaveOccurred())
@@ -253,13 +255,13 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("disruption cron spec.delayedStartTolerance is invalid", func() {
-				It("should return an error", func() {
+				It("should return an error", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					disruptionCron.Spec.DelayedStartTolerance = DisruptionDuration("-1s")
 
 					// Act
-					warnings, err := disruptionCron.ValidateCreate()
+					warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -272,7 +274,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 				When("the count is invalid", func() {
 					// Other forms of invalid disruptions are covered by the disruption_webook_test.go
 					// we just want to confirm we do validate the disruptionTemplate as part of the disruption cron webhook
-					It("should return an error", func() {
+					It("should return an error", func(specContext SpecContext) {
 						// Arrange
 						disruptionCron := makeValidDisruptionCron()
 						disruptionCron.Spec.DisruptionTemplate.Count = &intstr.IntOrString{
@@ -280,7 +282,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 						}
 
 						// Act
-						warnings, err := disruptionCron.ValidateCreate()
+						warnings, err := disruptionCron.ValidateCreate(specContext, disruptionCron)
 
 						// Assert
 						Expect(warnings).To(BeNil())
@@ -298,17 +300,17 @@ var _ = Describe("DisruptionCron Webhook", func() {
 				})
 
 				When("the userinfo is not present", func() {
-					It("should not allow the create", func() {
+					It("should not allow the create", func(ctx SpecContext) {
 						// Arrange
 						disruptionCron := makeValidDisruptionCron()
 
 						By("not emit an event to the broadcast")
 						mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-						mockEventRecorder.AssertNotCalled(GinkgoT(), "AnnotatedEventf", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+						mockEventRecorder.AssertNotCalled(GinkgoT(), "AnnotatedEventf", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 						disruptionCronWebhookRecorder = mockEventRecorder
 
 						// Act
-						warnings, err := disruptionCron.ValidateCreate()
+						warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 						// Assert
 						Expect(warnings).To(BeNil())
@@ -318,7 +320,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 				})
 
 				When("the userinfo is not in the permitted user groups", func() {
-					It("should not allow the create", func() {
+					It("should not allow the create", func(ctx SpecContext) {
 						// Arrange
 						disruptionCron := makeValidDisruptionCron()
 						Expect(disruptionCron.SetUserInfo(authV1.UserInfo{
@@ -328,11 +330,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 						By("not emit an event to the broadcast")
 						mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-						mockEventRecorder.AssertNotCalled(GinkgoT(), "AnnotatedEventf", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+						mockEventRecorder.AssertNotCalled(GinkgoT(), "AnnotatedEventf", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 						disruptionCronWebhookRecorder = mockEventRecorder
 
 						// Act
-						warnings, err := disruptionCron.ValidateCreate()
+						warnings, err := disruptionCron.ValidateCreate(ctx, disruptionCron)
 
 						// Assert
 						Expect(warnings).To(BeNil())
@@ -348,7 +350,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 		Describe("success cases", func() {
 			When("the controller is not in delete-only mode", func() {
-				It("should send an EventDisruptionCronUpdated event to the broadcast", func() {
+				It("should send an EventDisruptionCronUpdated event to the broadcast", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 
@@ -361,11 +363,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 					By("sending the EventDisruptionCronUpdated event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
+					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), "%s", Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(makeValidDisruptionCron())
+					warnings, err := disruptionCron.ValidateUpdate(ctx, makeValidDisruptionCron(), disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -376,7 +378,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("the controller is in delete-only mode", func() {
-				It("should send an EventDisruptionCronUpdated event to the broadcast", func() {
+				It("should send an EventDisruptionCronUpdated event to the broadcast", func(ctx SpecContext) {
 					// Arrange
 					disruptionCronWebhookDeleteOnly = true
 					disruptionCron := makeValidDisruptionCron()
@@ -390,11 +392,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 					By("sending the EventDisruptionCronUpdated event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
+					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), "%s", Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(makeValidDisruptionCron())
+					warnings, err := disruptionCron.ValidateUpdate(ctx, makeValidDisruptionCron(), disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -405,7 +407,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("the user info has not changed", func() {
-				It("should not return an error", func() {
+				It("should not return an error", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					userInfo := authV1.UserInfo{
@@ -426,11 +428,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 					By("emit an event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
+					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), "%s", Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(oldDisruptionCron)
+					warnings, err := disruptionCron.ValidateUpdate(ctx, oldDisruptionCron, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -442,7 +444,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("the schedule frequency becomes longer", func() {
-				It("should not return an error", func() {
+				It("should not return an error", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					oldDisruptionCron := makeValidDisruptionCron()
@@ -457,11 +459,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 					By("emit an event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
+					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), "%s", Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(oldDisruptionCron)
+					warnings, err := disruptionCron.ValidateUpdate(ctx, oldDisruptionCron, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -471,7 +473,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("the schedule frequency does not change", func() {
-				It("should not return an error", func() {
+				It("should not return an error", func(ctx SpecContext) {
 					// Arrange
 					minimumCronFrequency = time.Hour * 24 * 365
 					disruptionCron := makeValidDisruptionCron()
@@ -486,11 +488,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 					By("emit an event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
+					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, expectedAnnotation, Events[EventDisruptionCronUpdated].Type, string(EventDisruptionCronUpdated), "%s", Events[EventDisruptionCronUpdated].OnDisruptionTemplateMessage)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(oldDisruptionCron)
+					warnings, err := disruptionCron.ValidateUpdate(ctx, oldDisruptionCron, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -502,7 +504,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 		Describe("error cases", func() {
 			When("the user info has changed", func() {
-				DescribeTable("should return an error", func(userInfo, oldUserInfo authV1.UserInfo) {
+				DescribeTable("should return an error", func(ctx SpecContext, userInfo, oldUserInfo authV1.UserInfo) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					Expect(disruptionCron.SetUserInfo(userInfo)).To(Succeed())
@@ -512,11 +514,11 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 					By("not emit an event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.AssertNotCalled(GinkgoT(), "AnnotatedEventf", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+					mockEventRecorder.AssertNotCalled(GinkgoT(), "AnnotatedEventf", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(oldDisruptionCron)
+					warnings, err := disruptionCron.ValidateUpdate(ctx, oldDisruptionCron, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -557,13 +559,13 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			DescribeTable("should return an error when disruption cron name is invalid",
-				func(name, expectedError string) {
+				func(ctx SpecContext, name, expectedError string) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					disruptionCron.Name = name
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(makeValidDisruptionCron())
+					warnings, err := disruptionCron.ValidateUpdate(ctx, makeValidDisruptionCron(), disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -576,13 +578,13 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			)
 
 			When("disruption cron schedule is invalid", func() {
-				It("should return an error", func() {
+				It("should return an error", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					disruptionCron.Spec.Schedule = "****"
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(makeValidDisruptionCron())
+					warnings, err := disruptionCron.ValidateUpdate(ctx, makeValidDisruptionCron(), disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -592,13 +594,13 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("disruption cron spec.delayedStartTolerance is invalid", func() {
-				It("should return an error", func() {
+				It("should return an error", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 					disruptionCron.Spec.DelayedStartTolerance = DisruptionDuration("-1s")
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(makeValidDisruptionCron())
+					warnings, err := disruptionCron.ValidateUpdate(ctx, makeValidDisruptionCron(), disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -608,7 +610,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("the schedule frequency becomes shorter", func() {
-				It("should return an error", func() {
+				It("should return an error", func(ctx SpecContext) {
 					// Arrange
 					minimumCronFrequency = time.Hour * 24 * 365
 					disruptionCron := makeValidDisruptionCron()
@@ -616,7 +618,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 					disruptionCron.Spec.Schedule = "* * * * *"
 
 					// Act
-					warnings, err := disruptionCron.ValidateUpdate(oldDisruptionCron)
+					warnings, err := disruptionCron.ValidateUpdate(ctx, oldDisruptionCron, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -629,7 +631,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 				When("the count is invalid", func() {
 					// Other forms of invalid disruptions are covered by the disruption_webook_test.go
 					// we just want to confirm we do validate the disruptionTemplate as part of the disruption cron webhook
-					It("should return an error", func() {
+					It("should return an error", func(ctx SpecContext) {
 						// Arrange
 						disruptionCron := makeValidDisruptionCron()
 						disruptionCron.Spec.DisruptionTemplate.Count = &intstr.IntOrString{
@@ -637,7 +639,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 						}
 
 						// Act
-						warnings, err := disruptionCron.ValidateUpdate(makeValidDisruptionCron())
+						warnings, err := disruptionCron.ValidateUpdate(ctx, makeValidDisruptionCron(), disruptionCron)
 
 						// Assert
 						Expect(warnings).To(BeNil())
@@ -653,13 +655,13 @@ var _ = Describe("DisruptionCron Webhook", func() {
 
 		Describe("success cases", func() {
 			When("the controller is not in delete-only mode", func() {
-				It("should send an EventDisruptionCronDeleted event to the broadcast", func() {
+				It("should send an EventDisruptionCronDeleted event to the broadcast", func(ctx SpecContext) {
 					// Arrange
 					disruptionCron := makeValidDisruptionCron()
 
 					By("sending the EventDisruptionCronDeleted event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, mock.Anything, Events[EventDisruptionCronDeleted].Type, string(EventDisruptionCronDeleted), Events[EventDisruptionCronDeleted].OnDisruptionTemplateMessage).RunAndReturn(
+					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, mock.Anything, Events[EventDisruptionCronDeleted].Type, string(EventDisruptionCronDeleted), "%s", Events[EventDisruptionCronDeleted].OnDisruptionTemplateMessage).RunAndReturn(
 						func(object runtime.Object, annotations map[string]string, _ string, _ string, _ string, _ ...interface{}) {
 							inputDisruptionCron := object.(*DisruptionCron)
 
@@ -675,7 +677,7 @@ var _ = Describe("DisruptionCron Webhook", func() {
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateDelete()
+					warnings, err := disruptionCron.ValidateDelete(ctx, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())
@@ -686,18 +688,18 @@ var _ = Describe("DisruptionCron Webhook", func() {
 			})
 
 			When("the controller is in delete-only mode", func() {
-				It("should send an EventDisruptionCronDeleted event to the broadcast", func() {
+				It("should send an EventDisruptionCronDeleted event to the broadcast", func(ctx SpecContext) {
 					// Arrange
 					disruptionCronWebhookDeleteOnly = true
 					disruptionCron := makeValidDisruptionCron()
 
 					By("sending the EventDisruptionCronDeleted event to the broadcast")
 					mockEventRecorder := mocks.NewEventRecorderMock(GinkgoT())
-					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, mock.Anything, Events[EventDisruptionCronDeleted].Type, string(EventDisruptionCronDeleted), Events[EventDisruptionCronDeleted].OnDisruptionTemplateMessage)
+					mockEventRecorder.EXPECT().AnnotatedEventf(disruptionCron, mock.Anything, Events[EventDisruptionCronDeleted].Type, string(EventDisruptionCronDeleted), "%s", Events[EventDisruptionCronDeleted].OnDisruptionTemplateMessage)
 					disruptionCronWebhookRecorder = mockEventRecorder
 
 					// Act
-					warnings, err := disruptionCron.ValidateDelete()
+					warnings, err := disruptionCron.ValidateDelete(ctx, disruptionCron)
 
 					// Assert
 					Expect(warnings).To(BeNil())

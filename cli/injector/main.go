@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package main
 
@@ -14,20 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	chaosapi "github.com/DataDog/chaos-controller/api"
-	"github.com/DataDog/chaos-controller/api/v1beta1"
-	"github.com/DataDog/chaos-controller/cgroup"
-	"github.com/DataDog/chaos-controller/container"
-	"github.com/DataDog/chaos-controller/env"
-	"github.com/DataDog/chaos-controller/injector"
-	logger "github.com/DataDog/chaos-controller/log"
-	"github.com/DataDog/chaos-controller/netns"
-	"github.com/DataDog/chaos-controller/network"
-	"github.com/DataDog/chaos-controller/o11y/metrics"
-	metricstypes "github.com/DataDog/chaos-controller/o11y/metrics/types"
-	"github.com/DataDog/chaos-controller/pflag"
-	"github.com/DataDog/chaos-controller/process"
-	chaostypes "github.com/DataDog/chaos-controller/types"
 	"github.com/cenkalti/backoff"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -37,6 +23,21 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	chaosapi "github.com/DataDog/chaos-controller/api"
+	"github.com/DataDog/chaos-controller/api/v1beta1"
+	"github.com/DataDog/chaos-controller/cgroup"
+	"github.com/DataDog/chaos-controller/container"
+	"github.com/DataDog/chaos-controller/env"
+	"github.com/DataDog/chaos-controller/injector"
+	logger "github.com/DataDog/chaos-controller/log"
+	"github.com/DataDog/chaos-controller/netns"
+	"github.com/DataDog/chaos-controller/o11y/metrics"
+	metricstypes "github.com/DataDog/chaos-controller/o11y/metrics/types"
+	"github.com/DataDog/chaos-controller/o11y/tags"
+	"github.com/DataDog/chaos-controller/pflag"
+	"github.com/DataDog/chaos-controller/process"
+	chaostypes "github.com/DataDog/chaos-controller/types"
 )
 
 const (
@@ -82,13 +83,16 @@ func init() {
 
 	rootCmd.AddCommand(networkDisruptionCmd)
 	rootCmd.AddCommand(nodeFailureCmd)
+	rootCmd.AddCommand(podReplacementCmd)
 	rootCmd.AddCommand(containerFailureCmd)
 	rootCmd.AddCommand(cpuPressureCmd)
 	rootCmd.AddCommand(cpuPressureStressCmd)
+	rootCmd.AddCommand(memoryPressureCmd)
+	rootCmd.AddCommand(memoryPressureStressCmd)
 	rootCmd.AddCommand(diskFailureCmd)
 	rootCmd.AddCommand(diskPressureCmd)
-	rootCmd.AddCommand(dnsDisruptionCmd)
 	rootCmd.AddCommand(grpcDisruptionCmd)
+	rootCmd.AddCommand(dnsDisruptionCmd)
 
 	// basic args
 	rootCmd.PersistentFlags().BoolVar(&disruptionArgs.DryRun, "dry-run", false, "Enable dry-run mode")
@@ -102,18 +106,18 @@ func init() {
 	rootCmd.PersistentFlags().DurationVar(&disruptionArgs.PulseDormantDuration, "pulse-dormant-duration", time.Duration(0), "Duration of the disruption being dormant in a pulsing disruption (empty if the disruption is not pulsing)")
 	rootCmd.PersistentFlags().Var(notInjectedBeforeFlag, "not-injected-before", "")
 	rootCmd.PersistentFlags().Var(deadlineFlag, string(injector.DeadlineFlag), "RFC3339 time at which the disruption must be over by")
-	rootCmd.PersistentFlags().StringVar(&disruptionArgs.DNSServer, "dns-server", "8.8.8.8", "IP address of the upstream DNS server")
-	rootCmd.PersistentFlags().StringVar(&disruptionArgs.KubeDNS, "kube-dns", "off", "Whether to use kube-dns for DNS resolution (off, internal, all)")
 	rootCmd.PersistentFlags().StringVar(&disruptionArgs.ChaosNamespace, "chaos-namespace", "chaos-engineering", "Namespace that contains this chaos pod")
 	rootCmd.PersistentFlags().Uint32Var(&parentPID, string(injector.ParentPIDFlag), 0, "Parent process PID")
 
 	// log context args
 	rootCmd.PersistentFlags().StringVar(&disruptionArgs.DisruptionName, "log-context-disruption-name", "", "Log value: current disruption name")
 	rootCmd.PersistentFlags().StringVar(&disruptionArgs.DisruptionNamespace, "log-context-disruption-namespace", "", "Log value: current disruption namespace")
+	rootCmd.PersistentFlags().StringVar(&disruptionArgs.DisruptionUID, "log-context-disruption-uid", "", "Log value: current disruption UID")
 	rootCmd.PersistentFlags().StringVar(&disruptionArgs.TargetName, "log-context-target-name", "", "Log value: current target name")
 	rootCmd.PersistentFlags().StringVar(&disruptionArgs.TargetNodeName, "log-context-target-node-name", "", "Log value: node hosting the current target pod")
 
 	_ = cobra.MarkFlagRequired(rootCmd.PersistentFlags(), "level")
+
 	cobra.OnInitialize(initLogger)
 	cobra.OnInitialize(initMetricsSink)
 	cobra.OnInitialize(initExitSignalsHandler)
@@ -123,10 +127,10 @@ func init() {
 func main() {
 	// handle metrics sink client close on exit
 	defer func() {
-		log.Infow("closing metrics sink client before exiting", "sink", ms.GetSinkName())
+		log.Infow("closing metrics sink client before exiting", tags.SinkKey, ms.GetSinkName())
 
 		if err := ms.Close(); err != nil {
-			log.Errorw("error closing metrics sink client", "error", err, "sink", ms.GetSinkName())
+			log.Errorw("error closing metrics sink client", tags.ErrorKey, err, tags.SinkKey, ms.GetSinkName())
 		}
 	}()
 
@@ -148,14 +152,15 @@ func initLogger() {
 	}
 
 	log = log.With(
-		logger.DisruptionNameKey, disruptionArgs.DisruptionName,
-		logger.DisruptionNamespaceKey, disruptionArgs.DisruptionNamespace,
-		"targetName", disruptionArgs.TargetName,
-		"targetNodeName", disruptionArgs.TargetNodeName,
+		tags.DisruptionUIDKey, disruptionArgs.DisruptionUID,
+		tags.DisruptionNameKey, disruptionArgs.DisruptionName,
+		tags.DisruptionNamespaceKey, disruptionArgs.DisruptionNamespace,
+		tags.TargetNameKey, disruptionArgs.TargetName,
+		tags.TargetNodeNameKey, disruptionArgs.TargetNodeName,
 	)
 
 	if parentPID != 0 {
-		log = log.With("parentPid", parentPID)
+		log = log.With(tags.ParentPidKey, parentPID)
 	}
 }
 
@@ -165,10 +170,10 @@ func initMetricsSink() {
 
 	ms, err = metrics.GetSink(log, metricstypes.SinkDriver(disruptionArgs.MetricsSink), metricstypes.SinkAppInjector)
 	if err != nil {
-		log.Errorw("error while creating metric sink, switching to noop sink", "error", err, "driver", disruptionArgs.MetricsSink)
+		log.Errorw("error while creating metric sink, switching to noop sink", tags.ErrorKey, err, tags.DriverKey, disruptionArgs.MetricsSink)
 
 		if ms, err = metrics.GetSink(log, metricstypes.SinkDriverNoop, metricstypes.SinkAppInjector); err != nil {
-			log.Fatalw("error while creating noop metric sink", "error", err)
+			log.Fatalw("error while creating noop metric sink", tags.ErrorKey, err)
 		}
 	}
 }
@@ -203,7 +208,6 @@ func initManagers(pid uint32) (netns.Manager, cgroup.Manager, error) {
 func initConfig() {
 	pids := []uint32{}
 	ctns := []container.Container{}
-	dnsConfig := network.DNSConfig{DNSServer: disruptionArgs.DNSServer, KubeDNS: disruptionArgs.KubeDNS}
 
 	// log when dry-run mode is enabled
 	if disruptionArgs.DryRun {
@@ -224,6 +228,16 @@ func initConfig() {
 	// assign to the pointer to level the new value to persist it after this method
 	disruptionArgs.Level = chaostypes.DisruptionLevel(disruptionLevelRaw)
 
+	// check if we're running pod-replacement command which doesn't need containers
+	isPodReplacement := false
+
+	for _, arg := range os.Args {
+		if arg == chaostypes.DisruptionKindPodReplacement {
+			isPodReplacement = true
+			break
+		}
+	}
+
 	switch disruptionArgs.Level {
 	case chaostypes.DisruptionLevelPod:
 		// check for container ID flag
@@ -233,33 +247,39 @@ func initConfig() {
 			return
 		}
 
-		for containerName, containerID := range disruptionArgs.TargetContainers {
-			// retrieve container info
-			ctn, err := container.New(containerID, containerName)
-			if err != nil {
-				log.Fatalw("can't create container object", "error", err)
+		if !isPodReplacement {
+			// Pod replacement operates at the pod level and doesn't need container information
+			for containerName, containerID := range disruptionArgs.TargetContainers {
+				// retrieve container info
+				ctn, err := container.New(containerID, containerName)
+				if err != nil {
+					log.Fatalw("can't create container object", tags.ErrorKey, err)
+
+					return
+				}
+
+				log.Infow("injector targeting container", tags.ContainerIDKey, containerID, tags.ContainerNameKey, containerName)
+
+				pid := ctn.PID()
+
+				// keep pid for later if this is a chaos handler container
+				if disruptionArgs.OnInit && ctn.Name() == chaosInitContName {
+					handlerPID = pid
+				}
+
+				ctns = append(ctns, ctn)
+				pids = append(pids, pid)
+			}
+		} else {
+			// check for pod IP flag
+			if disruptionArgs.TargetPodIP == "" {
+				log.Fatal("--target-pod-ip flag must be passed when --level=pod")
 
 				return
 			}
 
-			log.Infow("injector targeting container", "containerID", containerID, "containerName", containerName)
-
-			pid := ctn.PID()
-
-			// keep pid for later if this is a chaos handler container
-			if disruptionArgs.OnInit && ctn.Name() == chaosInitContName {
-				handlerPID = pid
-			}
-
-			ctns = append(ctns, ctn)
-			pids = append(pids, pid)
-		}
-
-		// check for pod IP flag
-		if disruptionArgs.TargetPodIP == "" {
-			log.Fatal("--target-pod-ip flag must be passed when --level=pod")
-
-			return
+			pids = []uint32{1}
+			ctns = []container.Container{nil}
 		}
 	case chaostypes.DisruptionLevelNode:
 		pids = []uint32{1}
@@ -273,14 +293,14 @@ func initConfig() {
 	// create kubernetes clientset
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		log.Fatalw("error getting kubernetes client config", "error", err)
+		log.Fatalw("error getting kubernetes client config", tags.ErrorKey, err)
 
 		return
 	}
 
 	clientset, err = kubernetes.NewForConfig(config)
 	if err != nil {
-		log.Fatalw("error creating kubernetes client", "error", err)
+		log.Fatalw("error creating kubernetes client", tags.ErrorKey, err)
 
 		return
 	}
@@ -290,26 +310,25 @@ func initConfig() {
 		// create network namespace manager
 		netnsMgr, cgroupMgr, err := initManagers(pid)
 		if err != nil {
-			log.Fatalw("unable to create ns and cgroup managers for pid", "error", err, "pid", pid)
+			log.Fatalw("unable to create ns and cgroup managers for pid", tags.ErrorKey, err, tags.PidKey, pid)
 
 			return
 		}
 
 		// generate injector config
-		config := injector.Config{
+		injectorConfig := injector.Config{
 			MetricsSink:        ms,
 			TargetContainer:    ctns[i],
 			DisruptionDeadline: deadline,
 			Cgroup:             cgroupMgr,
 			Netns:              netnsMgr,
 			K8sClient:          clientset,
-			DNS:                dnsConfig,
 			Disruption:         disruptionArgs,
 			InjectorCtx:        injectorCtx,
 		}
-		config.Log = log.With("targetLevel", disruptionArgs.Level, "target", config.TargetName()) // targetName is already taken in the initLogger
+		injectorConfig.Log = log.With(tags.TargetLevelKey, disruptionArgs.Level, tags.TargetNameKey, injectorConfig.TargetName()) // targetName is already taken in the initLogger
 
-		configs = append(configs, config)
+		configs = append(configs, injectorConfig)
 	}
 
 	// mark the disruption as ready to be injected only when all injector configurations are successfully created
@@ -325,6 +344,7 @@ func initExitSignalsHandler() {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 
 	var injectorCancelFunc context.CancelFunc
+
 	injectorCtx, injectorCancelFunc = context.WithCancel(context.Background())
 
 	// In case the inject phase manages to take more than the disruption duration + activeDeadlineSeconds
@@ -378,7 +398,7 @@ func inject(kind string, sendToMetrics bool, reinjection bool) bool {
 				}
 			}
 
-			log.Errorw("disruption injection failed", "error", err, "target", inj.TargetName())
+			log.Errorw("disruption injection failed", tags.ErrorKey, err, tags.TargetNameKey, inj.TargetName())
 		} else {
 			if sendToMetrics {
 				if reinjection {
@@ -463,7 +483,7 @@ func clean(kind string, sendToMetrics bool, reinjectionClean bool) bool {
 				}
 			}
 
-			log.Errorw("disruption cleaning failed", "error", err)
+			log.Errorw("disruption cleaning failed", tags.ErrorKey, err)
 		} else {
 			log.Infof("disruption %s cleaned", inj.GetDisruptionKind())
 		}
@@ -486,27 +506,26 @@ func clean(kind string, sendToMetrics bool, reinjectionClean bool) bool {
 
 // pulse pulse disruptions (injection and cleaning)
 // nolint: unparam,staticcheck
-func pulse(isInjected *bool, sleepDuration *time.Duration, action func(string, bool, bool) bool, cmdName string) (func(string, bool, bool) bool, error) {
-	actionName := ""
+func pulse(isInjected bool, cmdName string) (bool, time.Time, error) {
+	// if the disruption is injected, we clean it
+	if isInjected {
+		log.Debugw("pulse: attempt at cleaning the disruption for the dormant duration", tags.DurationKey, disruptionArgs.PulseDormantDuration)
 
-	if !*isInjected {
-		action = inject
-		actionName = "inject"
-		*sleepDuration = disruptionArgs.PulseDormantDuration
-	} else {
-		action = clean
-		actionName = "clean"
-		*sleepDuration = disruptionArgs.PulseActiveDuration
+		if ok := clean(cmdName, true, true); !ok {
+			return true, time.Now().Add(disruptionArgs.PulseDormantDuration), fmt.Errorf("error on pulsing disruption mechanism when attempting to clean the disruption for the dormant pulse")
+		}
+
+		return false, time.Now().Add(disruptionArgs.PulseDormantDuration), nil
 	}
 
-	if ok := action(cmdName, true, true); !ok {
-		return nil, fmt.Errorf("error on pulsing disruption mechanism when attempting to %s", actionName)
+	// if the disruption is not injected, we inject it
+	log.Debugw("pulse: attempt at injecting the disruption for the active duration", tags.DurationKey, disruptionArgs.PulseActiveDuration)
+
+	if ok := inject(cmdName, true, true); !ok {
+		return false, time.Now().Add(disruptionArgs.PulseActiveDuration), fmt.Errorf("error on pulsing disruption mechanism when attempting to inject the disruption for the active pulse")
 	}
 
-	newInjected := !*isInjected
-	*isInjected = newInjected
-
-	return action, nil
+	return true, time.Now().Add(disruptionArgs.PulseActiveDuration), nil
 }
 
 // injectAndWait injects the disruption with the configured injector and waits
@@ -520,10 +539,11 @@ func injectAndWait(cmd *cobra.Command, args []string) {
 	}
 
 	if !disruptionArgs.NotInjectedBefore.IsZero() {
-		log.Infow("waiting for synchronized start to begin", "timeUntilNotInjectedBefore", time.Until(disruptionArgs.NotInjectedBefore).String())
+		log.Infow("waiting for synchronized start to begin", tags.TimeUntilNotInjectedBeforeKey, time.Until(disruptionArgs.NotInjectedBefore).String())
+
 		select {
 		case sig := <-signals:
-			log.Infow("an exit signal has been received", "signal", sig.String())
+			log.Infow("an exit signal has been received", tags.SignalKey, sig.String())
 
 			return
 		case <-time.After(time.Until(disruptionArgs.NotInjectedBefore)):
@@ -532,12 +552,13 @@ func injectAndWait(cmd *cobra.Command, args []string) {
 	}
 
 	if disruptionArgs.PulseInitialDelay > 0 {
-		log.Infow("waiting for initialDelay to pass", "initialDelay", disruptionArgs.PulseInitialDelay)
+		log.Infow("waiting for initialDelay to pass", tags.InitialDelayKey, disruptionArgs.PulseInitialDelay)
+
 		select {
 		case <-time.After(disruptionArgs.PulseInitialDelay):
 			break
 		case sig := <-signals:
-			log.Infow("an exit signal has been received", "signal", sig.String())
+			log.Infow("an exit signal has been received", tags.SignalKey, sig.String())
 
 			return
 		}
@@ -545,7 +566,7 @@ func injectAndWait(cmd *cobra.Command, args []string) {
 
 	processManager := process.NewManager(disruptionArgs.DryRun)
 
-	log.Infow("injecting the disruption", "kind", cmd.Name())
+	log.Infow("injecting the disruption", tags.KindKey, cmd.Name())
 
 	injectSuccess := inject(cmd.Name(), true, false)
 
@@ -554,7 +575,7 @@ func injectAndWait(cmd *cobra.Command, args []string) {
 		log.Infof("disruption(s) injected, now waiting for an exit signal")
 
 		if err := os.WriteFile(readinessProbeFile, []byte("1"), 0o400); err != nil {
-			log.Errorw("error writing readiness probe file", "error", err)
+			log.Errorw("error writing readiness probe file", tags.ErrorKey, err)
 		}
 	}
 
@@ -567,9 +588,9 @@ func injectAndWait(cmd *cobra.Command, args []string) {
 			// retrieve handler container process to send a signal
 			handlerProcess, err := processManager.Find(int(handlerPID))
 			if err != nil {
-				log.Errorw("error retrieving handler container process", "error", err)
+				log.Errorw("error retrieving handler container process", tags.ErrorKey, err)
 			} else if err := handlerProcess.Signal(syscall.SIGUSR1); err != nil { // send the SIGUSR1 signal
-				log.Errorw("error sending a SIGUSR1 signal to the handler container process", "error", err, "pid", handlerPID)
+				log.Errorw("error sending a SIGUSR1 signal to the handler container process", tags.ErrorKey, err, tags.PidKey, handlerPID)
 			}
 		} else {
 			log.Error("the --on-init flag was provided but no handler container could be found")
@@ -581,36 +602,38 @@ func injectAndWait(cmd *cobra.Command, args []string) {
 		break
 	// those disruptions should not watch target to re-inject on container restart
 	case v1beta1.DisruptionIsNotReinjectable((chaostypes.DisruptionKindName)(cmd.Name())):
-	case disruptionArgs.Level == chaostypes.DisruptionLevelNode:
+	case parentPID == 0 && disruptionArgs.Level == chaostypes.DisruptionLevelNode:
 		if disruptionArgs.PulseActiveDuration > 0 && disruptionArgs.PulseDormantDuration > 0 {
 			var (
-				action func(string, bool, bool) bool
-				err    error
+				err error
 			)
 
+			// at that point, the disruption is injected. We start the pulsing loop with the active duration
 			isInjected := true
-			sleepDuration := disruptionArgs.PulseActiveDuration
+			pulseDeadline := time.Now().Add(disruptionArgs.PulseActiveDuration)
 
 			// using a label for the loop to be able to break out of it
 		pulsingLoop:
 			for { // This loop will wait, clean, wait, inject until a signal is received
 				select { // Quit on signal reception or sleep and injects / cleans the disruptions
 				case sig := <-signals:
-					log.Infow("an exit signal has been received", "signal", sig.String())
+					log.Infow("an exit signal has been received", tags.SignalKey, sig.String())
 
 					return
 				case <-time.After(getDuration(deadline)):
 					log.Infow("duration has expired")
 
 					return
-				case <-time.After(sleepDuration):
-					action, err = pulse(&isInjected, &sleepDuration, action, cmd.Name())
+				case <-time.After(getDuration(pulseDeadline)):
+					isInjected, pulseDeadline, err = pulse(isInjected, cmd.Name())
 					if err != nil {
-						log.Errorw("an error occurred when calling pulse", "error", err)
+						log.Errorw("an error occurred when calling pulse", tags.ErrorKey, err)
 
 						// break of PulsingLoop only
 						break pulsingLoop
 					}
+
+					log.Infow("pulse action has been performed", tags.PulseNextActionTimestampKey, pulseDeadline)
 				}
 			}
 		}
@@ -623,7 +646,8 @@ func injectAndWait(cmd *cobra.Command, args []string) {
 
 				for range time.Tick(1 * time.Second) {
 					if _, err := processManager.Exists(int(parentPID)); err != nil {
-						log.Errorw("an error occurred when looking at parent process, it may no longer exists, exiting...", "error", err)
+						log.Errorw("an error occurred when looking at parent process, it may no longer exists, exiting...", tags.ErrorKey, err)
+
 						signals <- os.Interrupt
 					}
 				}
@@ -641,9 +665,9 @@ func injectAndWait(cmd *cobra.Command, args []string) {
 			func() error {
 				return watchTargetAndReinject(deadline, cmd.Name(), disruptionArgs.PulseActiveDuration, disruptionArgs.PulseDormantDuration)
 			}, backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 5), func(err error, delay time.Duration) {
-				log.Warnln("couldn't watch targeted pod, retrying", "error", err, "retrying", delay)
+				log.Warnln("couldn't watch targeted pod, retrying", tags.ErrorKey, err, tags.RetryingKey, delay)
 			}); err != nil {
-			log.Errorln("unable to watch targeted pod after several retry, ending...", "error", err)
+			log.Errorln("unable to watch targeted pod after several retry, ending...", tags.ErrorKey, err)
 		} else {
 			return
 		}
@@ -680,7 +704,7 @@ func injectAndWait(cmd *cobra.Command, args []string) {
 			log.Warnf("parent did not sent any signal in the last %v seconds, exiting", maxDurationWithoutParentSignal)
 			return
 		case sig := <-signals:
-			log.Infow("an exit signal has been received, exiting", "signal", sig.String())
+			log.Infow("an exit signal has been received, exiting", tags.SignalKey, sig.String())
 			return
 		case <-time.After(getDuration(deadline)):
 			log.Info("disruption duration has expired, exiting")
@@ -697,20 +721,19 @@ func watchTargetAndReinject(deadline time.Time, commandName string, pulseActiveD
 		return err
 	}
 
+	// at that point, the disruption is injected. We start the pulsing loop with the active duration
 	pulseIndexIsInjected := true
 
-	var pulseSleepDuration time.Duration
+	var pulseDeadline time.Time
 
 	// set sleepDuration to after deadline duration to never go into the pulsing condition
 	if pulseActiveDuration > 0 && pulseDormantDuration > 0 {
-		pulseSleepDuration = pulseActiveDuration
+		pulseDeadline = time.Now().Add(pulseActiveDuration)
 	} else {
-		pulseSleepDuration = getDuration(deadline) + time.Hour
+		pulseDeadline = time.Now().Add(getDuration(deadline) + time.Hour)
 	}
 
 	var channel <-chan watch.Event
-
-	var actionOnPulse func(string, bool, bool) bool
 
 	for {
 		if channel == nil {
@@ -721,7 +744,7 @@ func watchTargetAndReinject(deadline time.Time, commandName string, pulseActiveD
 
 		select {
 		case sig := <-signals:
-			log.Infow("an exit signal has been received", "signal", sig.String())
+			log.Infow("an exit signal has been received", tags.SignalKey, sig.String())
 			// We've already consumed the signal from the channel, so our caller won't find it when checking after we return.
 			// Thus we need to put the signal back into the channel. We do it in a gothread in case we are blocked when writing to the channel
 			go func() { signals <- sig }()
@@ -732,17 +755,19 @@ func watchTargetAndReinject(deadline time.Time, commandName string, pulseActiveD
 
 			return nil
 		// shouldn't go there if it's not a pulsing disruption
-		case <-time.After(pulseSleepDuration):
+		case <-time.After(getDuration(pulseDeadline)):
 			if pulseActiveDuration == 0 || pulseDormantDuration == 0 {
 				break
 			}
 
-			actionOnPulse, err = pulse(&pulseIndexIsInjected, &pulseSleepDuration, actionOnPulse, commandName)
+			pulseIndexIsInjected, pulseDeadline, err = pulse(pulseIndexIsInjected, commandName)
 			if err != nil {
 				return err
 			}
+
+			log.Infow("pulse action has been performed", tags.PulseNextActionTimestampKey, pulseDeadline)
 		case event, ok := <-channel: // We have changes in the pod watched
-			log.Debugw("received event during target watch", "type", event.Type)
+			log.Debugw("received event during target watch", tags.TypeKey, event.Type)
 
 			if !ok {
 				channel = nil
@@ -752,7 +777,7 @@ func watchTargetAndReinject(deadline time.Time, commandName string, pulseActiveD
 
 			pod, ok := event.Object.(*v1.Pod)
 			if !ok {
-				log.Debugw("received event was not a pod", "event", event, "event.Object", event.Object)
+				log.Debugw("received event was not a pod", tags.EventKey, event, tags.EventObjectKey, event.Object)
 
 				status, sok := event.Object.(*metav1.Status)
 				if sok {
@@ -765,9 +790,6 @@ func watchTargetAndReinject(deadline time.Time, commandName string, pulseActiveD
 						}
 
 						if updResourceVersion == resourceVersion {
-							// We don't have the latest resource version, but we can't seem to find a new one.
-							// Wait 10 seconds and retry.
-							time.Sleep(time.Second * 10)
 							// An unset resource version is an implicit "latest" request.
 							resourceVersion = ""
 						} else {
@@ -776,7 +798,7 @@ func watchTargetAndReinject(deadline time.Time, commandName string, pulseActiveD
 
 						channel = nil
 
-						log.Debugw("restarting pod watching channel with newest resource version", "resourceVersion", resourceVersion)
+						log.Debugw("restarting pod watching channel with newest resource version", tags.ResourceVersionKey, resourceVersion)
 
 						continue
 					}
@@ -789,7 +811,7 @@ func watchTargetAndReinject(deadline time.Time, commandName string, pulseActiveD
 				resourceVersion = pod.ResourceVersion
 				channel = nil
 
-				log.Debugw("received bookmark event, new resource version found", "resourceVersion", pod.ResourceVersion)
+				log.Debugw("received bookmark event, new resource version found", tags.ResourceVersionKey, pod.ResourceVersion)
 			}
 
 			if event.Type != watch.Modified {
@@ -847,7 +869,7 @@ func cleanAndExit(cmd *cobra.Command, args []string) {
 	}
 
 	if err := backoff.RetryNotify(cleanFinalizer, backoff.WithMaxRetries(backoff.NewExponentialBackOff(), 3), retryNotifyHandler); err != nil {
-		log.Errorw("couldn't safely remove this pod's finalizer", "error", err)
+		log.Errorw("couldn't safely remove this pod's finalizer", tags.ErrorKey, err)
 	}
 
 	log.Info("disruption(s) cleaned, now exiting")
@@ -857,14 +879,14 @@ func cleanFinalizer() error {
 	if len(configs) == 0 {
 		err := fmt.Errorf("no configuration available for this disruption")
 
-		log.Warnw("couldn't GET this pod in order to remove its finalizer", "pod", os.Getenv(env.InjectorPodName), "error", err)
+		log.Warnw("couldn't GET this pod in order to remove its finalizer", tags.PodNameKey, os.Getenv(env.InjectorPodName), tags.ErrorKey, err)
 
 		return err
 	}
 
 	pod, err := configs[0].K8sClient.CoreV1().Pods(disruptionArgs.ChaosNamespace).Get(context.Background(), os.Getenv(env.InjectorPodName), metav1.GetOptions{})
 	if err != nil {
-		log.Warnw("couldn't GET this pod in order to remove its finalizer", "pod", os.Getenv(env.InjectorPodName), "error", err)
+		log.Warnw("couldn't GET this pod in order to remove its finalizer", tags.PodNameKey, os.Getenv(env.InjectorPodName), tags.ErrorKey, err)
 		return err
 	}
 
@@ -872,7 +894,7 @@ func cleanFinalizer() error {
 
 	_, err = configs[0].K8sClient.CoreV1().Pods(disruptionArgs.ChaosNamespace).Update(context.Background(), pod, metav1.UpdateOptions{})
 	if err != nil {
-		log.Warnw("couldn't remove this pod's finalizer", "pod", os.Getenv(env.InjectorPodName), "error", err)
+		log.Warnw("couldn't remove this pod's finalizer", tags.PodNameKey, os.Getenv(env.InjectorPodName), tags.ErrorKey, err)
 		return err
 	}
 
@@ -882,7 +904,7 @@ func cleanFinalizer() error {
 // handleMetricError logs the given error if not nil
 func handleMetricError(err error) {
 	if err != nil {
-		log.Errorw("error sending metric", "sink", ms.GetSinkName(), "error", err)
+		log.Errorw("error sending metric", tags.SinkKey, ms.GetSinkName(), tags.ErrorKey, err)
 	}
 }
 
@@ -890,9 +912,9 @@ func handleMetricError(err error) {
 // it logs the error and the time to wait before the next retry
 func retryNotifyHandler(err error, delay time.Duration) {
 	if v1beta1.IsUpdateConflictError(err) {
-		log.Infow("a retryable error occurred during disruption cleanup", "error", err)
+		log.Infow("a retryable error occurred during disruption cleanup", tags.ErrorKey, err)
 	} else {
-		log.Errorw("disruption cleanup failed", "error", err)
+		log.Errorw("disruption cleanup failed", tags.ErrorKey, err)
 	}
 
 	log.Infof("retrying cleanup in %s", delay.String())
@@ -924,13 +946,13 @@ func updateTargetContainersAndDetectChange(pod v1.Pod) (bool, error) {
 		targetContainerNames = append(targetContainerNames, name)
 	}
 
-	log.Debugw("disruption args containers BEFORE updating them", "target_containers", disruptionArgs.TargetContainers)
+	log.Debugw("disruption args containers BEFORE updating them", tags.TargetContainersKey, disruptionArgs.TargetContainers)
 
 	if disruptionArgs.TargetContainers, err = v1beta1.TargetedContainers(pod, targetContainerNames); err != nil {
 		return false, fmt.Errorf("unable to get targeted containers info. Waiting for next change to reinject: %w", err)
 	}
 
-	log.Debugw("disruption args containers AFTER updating them", "target_containers", disruptionArgs.TargetContainers)
+	log.Debugw("disruption args containers AFTER updating them", tags.TargetContainersKey, disruptionArgs.TargetContainers)
 
 	for _, conf := range configs {
 		newContainerID, newContainerExists := disruptionArgs.TargetContainers[conf.TargetContainer.Name()]
@@ -941,7 +963,12 @@ func updateTargetContainersAndDetectChange(pod v1.Pod) (bool, error) {
 		}
 
 		if !newContainerExists || parsedNewContainerID != conf.TargetContainer.ID() {
-			log.Infow("change detected for container", "container_name", conf.TargetContainer.Name(), "new_container_exists", newContainerExists, "new_container_id", newContainerID, "old_container_id", conf.TargetContainer.ID())
+			log.Infow("change detected for container",
+				tags.ContainerNameKey, conf.TargetContainer.Name(),
+				tags.NewContainerExistsKey, newContainerExists,
+				tags.NewContainerIDKey, newContainerID,
+				tags.OldContainerIDKey, conf.TargetContainer.ID(),
+			)
 
 			return true, nil
 		}

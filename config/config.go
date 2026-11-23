@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package config
 
@@ -23,6 +23,7 @@ import (
 
 	cloudtypes "github.com/DataDog/chaos-controller/cloudservice/types"
 	"github.com/DataDog/chaos-controller/eventnotifier"
+	"github.com/DataDog/chaos-controller/o11y/tags"
 )
 
 type config struct {
@@ -57,6 +58,8 @@ type controllerConfig struct {
 	FinalizerDeletionDelay           time.Duration                   `json:"finalizerDeletionDelay" yaml:"finalizerDeletionDelay"`
 	TargetResourceMissingThreshold   time.Duration                   `json:"targetResourceMissingThreshold" yaml:"targetResourceMissingThreshold"`
 	DisabledDisruptions              []string                        `json:"disabledDisruptions" yaml:"disabledDisruptions"`
+	ClientGoQPS                      float64                         `json:"clientGoQPS" yaml:"clientGoQPS"`
+	ClientGoBurst                    int                             `json:"clientGoBurst" yaml:"clientGoBurst"`
 }
 
 type controllerWebhookConfig struct {
@@ -81,7 +84,6 @@ type injectorConfig struct {
 	Labels            map[string]string               `json:"labels" yaml:"labels"`
 	ChaosNamespace    string                          `json:"chaosNamespace" yaml:"chaosNamespace"`
 	ServiceAccount    string                          `json:"serviceAccount" yaml:"serviceAccount"`
-	DNSDisruption     injectorDNSDisruptionConfig     `json:"dnsDisruption" yaml:"dnsDisruption"`
 	NetworkDisruption injectorNetworkDisruptionConfig `json:"networkDisruption" yaml:"networkDisruption"`
 	ImagePullSecrets  string                          `json:"imagePullSecrets" yaml:"imagePullSecrets"`
 	Tolerations       []Toleration                    `json:"tolerations" yaml:"tolerations,omitempty"`
@@ -96,14 +98,11 @@ type Toleration struct {
 	TolerationSeconds *int64 `json:"tolerationSeconds,omitempty" yaml:"tolerationSeconds,omitempty"`
 }
 
-type injectorDNSDisruptionConfig struct {
-	DNSServer string `json:"dnsServer" yaml:"dnsServer"`
-	KubeDNS   string `json:"kubeDns" yaml:"kubeDns"`
-}
-
 type injectorNetworkDisruptionConfig struct {
 	AllowedHosts        []string      `json:"allowedHosts" yaml:"allowedHosts"`
 	HostResolveInterval time.Duration `json:"hostResolveInterval" yaml:"hostResolveInterval"`
+	DNSPodResolvConf    string        `json:"dnsPodResolvConf" yaml:"dnsPodResolvConf"`
+	DNSNodeResolvConf   string        `json:"dnsNodeResolvConf" yaml:"dnsNodeResolvConf"`
 }
 
 type handlerConfig struct {
@@ -128,7 +127,7 @@ func New(client corev1client.ConfigMapInterface, logger *zap.SugaredLogger, osAr
 	preConfigFS := pflag.NewFlagSet("pre-config", pflag.ContinueOnError)
 	mainFS := pflag.NewFlagSet("main-config", pflag.ContinueOnError)
 
-	preConfigFS.ParseErrorsWhitelist.UnknownFlags = true
+	preConfigFS.ParseErrorsAllowlist.UnknownFlags = true
 	preConfigFS.StringVar(&configPath, "config", "", "Configuration file path")
 	preConfigFS.StringVar(&configMapOverrides, "config-overrides", "", "Name of ConfigMap to provide config overrides")
 	// we redefine configuration flag into main flag to avoid removing it manually from provided args
@@ -331,18 +330,6 @@ func New(client corev1client.ConfigMapInterface, logger *zap.SugaredLogger, osAr
 		return cfg, err
 	}
 
-	mainFS.StringVar(&cfg.Injector.DNSDisruption.DNSServer, "injector-dns-disruption-dns-server", "8.8.8.8", "IP address of the upstream DNS server")
-
-	if err := viper.BindPFlag("injector.dnsDisruption.dnsServer", mainFS.Lookup("injector-dns-disruption-dns-server")); err != nil {
-		return cfg, err
-	}
-
-	mainFS.StringVar(&cfg.Injector.DNSDisruption.KubeDNS, "injector-dns-disruption-kube-dns", "off", "Whether to use kube-dns for DNS resolution (off, internal, all)")
-
-	if err := viper.BindPFlag("injector.dnsDisruption.kubeDns", mainFS.Lookup("injector-dns-disruption-kube-dns")); err != nil {
-		return cfg, err
-	}
-
 	mainFS.StringSliceVar(&cfg.Injector.NetworkDisruption.AllowedHosts, "injector-network-disruption-allowed-hosts", []string{}, "List of hosts always allowed by network disruptions (format: <host>;<port>;<protocol>;<flow>)")
 
 	if err := viper.BindPFlag("injector.networkDisruption.allowedHosts", mainFS.Lookup("injector-network-disruption-allowed-hosts")); err != nil {
@@ -352,6 +339,18 @@ func New(client corev1client.ConfigMapInterface, logger *zap.SugaredLogger, osAr
 	mainFS.DurationVar(&cfg.Injector.NetworkDisruption.HostResolveInterval, "injector-network-disruption-host-resolve-interval", time.Minute, "How often to re-resolve hostnames specified in a network disruption")
 
 	if err := viper.BindPFlag("injector.networkDisruption.hostResolveInterval", mainFS.Lookup("injector-network-disruption-host-resolve-interval")); err != nil {
+		return cfg, err
+	}
+
+	mainFS.StringVar(&cfg.Injector.NetworkDisruption.DNSPodResolvConf, "injector-network-disruption-dns-pod-resolv-conf", "/etc/resolv.conf", "Path to pod DNS resolv.conf file")
+
+	if err := viper.BindPFlag("injector.networkDisruption.dnsPodResolvConf", mainFS.Lookup("injector-network-disruption-dns-pod-resolv-conf")); err != nil {
+		return cfg, err
+	}
+
+	mainFS.StringVar(&cfg.Injector.NetworkDisruption.DNSNodeResolvConf, "injector-network-disruption-dns-node-resolv-conf", "/mnt/host/etc/resolv.conf", "Path to node DNS resolv.conf file")
+
+	if err := viper.BindPFlag("injector.networkDisruption.dnsNodeResolvConf", mainFS.Lookup("injector-network-disruption-dns-node-resolv-conf")); err != nil {
 		return cfg, err
 	}
 
@@ -423,7 +422,7 @@ func New(client corev1client.ConfigMapInterface, logger *zap.SugaredLogger, osAr
 		return cfg, err
 	}
 
-	mainFS.StringSliceVar(&cfg.Controller.DisabledDisruptions, "disabled-disruptions", []string{}, "List of Disruption Kinds to disable. These should match their kind names from types.go: e.g., `dns-disruption`, `container-failure`, etc. ")
+	mainFS.StringSliceVar(&cfg.Controller.DisabledDisruptions, "disabled-disruptions", []string{}, "List of Disruption Kinds to disable. These should match their kind names from types.go: e.g., `container-failure`, `node-failure`, etc. ")
 
 	if err := viper.BindPFlag("controller.disabledDisruptions", mainFS.Lookup("disabled-disruptions")); err != nil {
 		return cfg, err
@@ -576,13 +575,25 @@ func New(client corev1client.ConfigMapInterface, logger *zap.SugaredLogger, osAr
 		return cfg, err
 	}
 
+	mainFS.Float64Var(&cfg.Controller.ClientGoQPS, "client-go-qps", 0, "Number of queries per second client-go is allowed to make (default 0 to use the default value of the go-client)")
+
+	if err := viper.BindPFlag("controller.clientGoQPS", mainFS.Lookup("client-go-qps")); err != nil {
+		return cfg, err
+	}
+
+	mainFS.IntVar(&cfg.Controller.ClientGoBurst, "client-go-burst", 0, "Allowed burst queries for client-go (default 0 to use the default value of the go-client)")
+
+	if err := viper.BindPFlag("controller.clientGoBurst", mainFS.Lookup("client-go-burst")); err != nil {
+		return cfg, err
+	}
+
 	if err := preConfigFS.Parse(osArgs); err != nil {
 		return cfg, fmt.Errorf("unable to retrieve configuration parse from provided flag: %w", err)
 	}
 
 	// load configuration file if present first and add values to cfg struct
 	if configPath != "" {
-		logger.Infow("loading configuration file", "config", configPath)
+		logger.Infow("loading configuration file", tags.ConfigKey, configPath)
 
 		viper.SetConfigFile(configPath)
 
@@ -595,12 +606,15 @@ func New(client corev1client.ConfigMapInterface, logger *zap.SugaredLogger, osAr
 
 			if backOffErr := backoff.Retry(func() error {
 				var err error
+
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
+
 				configMap, err = client.Get(ctx, configMapOverrides, metav1.GetOptions{})
 				if err != nil {
-					logger.Debugw(fmt.Sprintf("failed to get %s configMap", configMapOverrides), "error", err)
+					logger.Debugw(fmt.Sprintf("failed to get %s configMap", configMapOverrides), tags.ErrorKey, err)
 				}
+
 				return err
 			},
 				backoff.NewConstantBackOff(time.Second*5)); backOffErr != nil {
@@ -623,9 +637,8 @@ func New(client corev1client.ConfigMapInterface, logger *zap.SugaredLogger, osAr
 					<-ticker.C
 
 					configMap, err := client.Get(context.Background(), configMapOverrides, metav1.GetOptions{})
-
 					if err != nil {
-						logger.Errorw(fmt.Sprintf("error getting %s configMap", configMapOverrides), "error", err)
+						logger.Errorw(fmt.Sprintf("error getting %s configMap", configMapOverrides), tags.ErrorKey, err)
 						continue
 					}
 

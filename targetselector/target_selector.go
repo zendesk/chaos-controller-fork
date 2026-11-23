@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package targetselector
 
@@ -18,13 +18,13 @@ import (
 // TargetSelector is an interface for applying network disruptions to a Kubernetes Cluster
 type TargetSelector interface {
 	// GetMatchingPodsOverTotalPods Returns list of matching ready and untargeted pods and number of total pods
-	GetMatchingPodsOverTotalPods(c client.Client, instance *chaosv1beta1.Disruption) (*corev1.PodList, int, error)
+	GetMatchingPodsOverTotalPods(c client.Reader, instance *chaosv1beta1.Disruption) (*corev1.PodList, int, error)
 
 	// GetMatchingNodesOverTotalNodes Returns list of matching ready and untargeted nodes and number of total nodes
-	GetMatchingNodesOverTotalNodes(c client.Client, instance *chaosv1beta1.Disruption) (*corev1.NodeList, int, error)
+	GetMatchingNodesOverTotalNodes(c client.Reader, instance *chaosv1beta1.Disruption) (*corev1.NodeList, int, error)
 
 	// TargetIsHealthy Returns an error if the given target is unhealthy or does not exist
-	TargetIsHealthy(target string, c client.Client, instance *chaosv1beta1.Disruption) error
+	TargetIsHealthy(target string, c client.Reader, instance *chaosv1beta1.Disruption) error
 }
 
 // ValidateLabelSelector assert label selector matches valid grammar, avoids CORE-414

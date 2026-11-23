@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package builderstest_test
 
@@ -80,10 +80,6 @@ func (b *DisruptionBuilder) WithDisruptionKind(kind types.DisruptionKindName) *D
 			case types.DisruptionKindDiskPressure:
 				if b.Spec.DiskPressure == nil {
 					b.Spec.DiskPressure = &v1beta1.DiskPressureSpec{}
-				}
-			case types.DisruptionKindDNSDisruption:
-				if b.Spec.DNS == nil {
-					b.Spec.DNS = v1beta1.DNSDisruptionSpec{}
 				}
 			case types.DisruptionKindGRPCDisruption:
 				if b.Spec.GRPC == nil {
@@ -240,12 +236,12 @@ func (b *DisruptionBuilder) WithAnnotations(annotations map[string]string) *Disr
 	b.modifiers = append(
 		b.modifiers,
 		func() {
-			if b.ObjectMeta.Annotations == nil {
-				b.ObjectMeta.Annotations = make(map[string]string)
+			if b.Annotations == nil {
+				b.Annotations = make(map[string]string)
 			}
 
 			for k, v := range annotations {
-				b.ObjectMeta.Annotations[k] = v
+				b.Annotations[k] = v
 			}
 		})
 

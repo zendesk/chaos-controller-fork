@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package main
 
@@ -110,6 +110,7 @@ func main() {
 	fmt.Printf("connecting to %v...\n", serverAddr)
 
 	var opts []grpc.DialOption
+
 	opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 
 	conn, err := grpc.NewClient(serverAddr, opts...)

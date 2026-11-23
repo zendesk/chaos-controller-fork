@@ -1,7 +1,27 @@
+# Build stage
+ARG BUILDGOVERSION=1.26.2
+FROM golang:${BUILDGOVERSION} AS builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH
+
+WORKDIR /go/src/github.com/chaos-controller/
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the source code
+COPY . .
+
+# Build the handler binary
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -o handler ./cli/handler
+
+# Final stage
 FROM scratch AS handler
 
-ARG TARGETARCH
-COPY handler_${TARGETARCH} /usr/local/bin/handler
+COPY --chmod=100 --from=builder /go/src/github.com/chaos-controller/handler /usr/local/bin/handler
 
 ENTRYPOINT ["/usr/local/bin/handler"]
 

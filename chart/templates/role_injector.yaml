@@ -1,7 +1,7 @@
 # Unless explicitly stated otherwise all files in this repository are licensed
 # under the Apache License Version 2.0.
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
-# Copyright 2025 Datadog, Inc.
+# Copyright 2026 Datadog, Inc.
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -19,6 +19,7 @@ rules:
       - get
       - update
       - watch
+      - delete
   - apiGroups:
       - ""
     resources:
@@ -27,3 +28,19 @@ rules:
       - list
       - get
       - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+      - list
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - persistentvolumeclaims
+    verbs:
+      - list
+      - get
+      - delete

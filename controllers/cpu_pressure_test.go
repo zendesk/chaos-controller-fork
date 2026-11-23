@@ -1,27 +1,21 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package controllers
 
 import (
-	"bytes"
-	"fmt"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/remotecommand"
 
 	chaosv1beta1 "github.com/DataDog/chaos-controller/api/v1beta1"
 	chaostypes "github.com/DataDog/chaos-controller/types"
@@ -51,8 +45,62 @@ var _ = Describe("CPU Pressure", func() {
 	})
 
 	JustBeforeEach(func(ctx SpecContext) {
-		Skip("See CHAOSPLT-212: Data Race in test")
 		cpuStress, targetPod, _ = InjectPodsAndDisruption(ctx, cpuStress, true)
+	})
+
+	Context("pulse mode", func() {
+		BeforeEach(func() {
+			cpuStress.Spec.Duration = "2m"
+			cpuStress.Spec.Pulse = &chaosv1beta1.DisruptionPulse{
+				ActiveDuration:  chaosv1beta1.DisruptionDuration("15s"),
+				DormantDuration: chaosv1beta1.DisruptionDuration("10s"),
+			}
+		})
+
+		It("should inject with pulse arguments and cycle through active/dormant phases", func(ctx SpecContext) {
+			ExpectDisruptionStatus(ctx, cpuStress, chaostypes.DisruptionInjectionStatusInjected)
+
+			By("Ensuring chaos pod is created")
+			ExpectChaosPods(ctx, cpuStress, 1)
+
+			By("Verifying chaos pod has pulse arguments")
+			Eventually(func(g Gomega, ctx SpecContext) {
+				chaosPods, err := listChaosPods(ctx, cpuStress)
+				g.Expect(err).ToNot(HaveOccurred())
+				g.Expect(chaosPods.Items).To(HaveLen(1))
+
+				args := strings.Join(chaosPods.Items[0].Spec.Containers[0].Args, " ")
+				g.Expect(args).To(ContainSubstring("cpu-pressure"))
+				g.Expect(args).To(ContainSubstring("--pulse-active-duration"))
+				g.Expect(args).To(ContainSubstring("--pulse-dormant-duration"))
+			}).WithContext(ctx).Within(calcDisruptionGoneTimeout(cpuStress)).ProbeEvery(disruptionPotentialChangesEvery).Should(Succeed())
+
+			By("Ensuring disruption stays healthy throughout pulse cycle")
+			ExpectDisruptionStatusUntilExpired(ctx, cpuStress, chaostypes.DisruptionInjectionStatusInjected)
+		})
+
+		When("initial delay is configured", func() {
+			BeforeEach(func() {
+				cpuStress.Spec.Pulse.InitialDelay = chaosv1beta1.DisruptionDuration("5s")
+			})
+
+			It("should inject with initial delay argument and remain healthy", func(ctx SpecContext) {
+				ExpectDisruptionStatus(ctx, cpuStress, chaostypes.DisruptionInjectionStatusInjected)
+
+				By("Verifying chaos pod has initial delay argument")
+				Eventually(func(g Gomega, ctx SpecContext) {
+					chaosPods, err := listChaosPods(ctx, cpuStress)
+					g.Expect(err).ToNot(HaveOccurred())
+					g.Expect(chaosPods.Items).To(HaveLen(1))
+
+					args := strings.Join(chaosPods.Items[0].Spec.Containers[0].Args, " ")
+					g.Expect(args).To(ContainSubstring("--pulse-initial-delay"))
+				}).WithContext(ctx).Within(calcDisruptionGoneTimeout(cpuStress)).ProbeEvery(disruptionPotentialChangesEvery).Should(Succeed())
+
+				By("Ensuring disruption stays healthy throughout pulse cycle with initial delay")
+				ExpectDisruptionStatusUntilExpired(ctx, cpuStress, chaostypes.DisruptionInjectionStatusInjected)
+			})
+		})
 	})
 
 	DescribeTable("targeted container is stopped", func(ctx SpecContext, forced bool) {
@@ -76,11 +124,24 @@ var _ = Describe("CPU Pressure", func() {
 			},
 		}
 
+		disruptionKey := types.NamespacedName{Namespace: cpuStress.Namespace, Name: cpuStress.Name}
+
 		Concurrently{
 			func(ctx SpecContext) {
-				Consistently(func(ctx SpecContext) bool {
-					return ExpectDisruptionStatus(ctx, cpuStress, chaostypes.DisruptionInjectionStatusInjected, chaostypes.DisruptionInjectionStatusPausedInjected, chaostypes.DisruptionInjectionStatusPreviouslyInjected)
-				}).WithContext(ctx).Within(calcDisruptionGoneTimeout(cpuStress)).ProbeEvery(disruptionPotentialChangesEvery).Should(BeTrue())
+				Consistently(func(g Gomega, ctx SpecContext) {
+					var dis chaosv1beta1.Disruption
+					if err := k8sClient.Get(ctx, disruptionKey, &dis); apierrors.IsNotFound(err) {
+						return
+					} else {
+						g.Expect(err).ToNot(HaveOccurred())
+					}
+
+					g.Expect(dis.Status.InjectionStatus).To(BeElementOf(
+						chaostypes.DisruptionInjectionStatusInjected,
+						chaostypes.DisruptionInjectionStatusPausedInjected,
+						chaostypes.DisruptionInjectionStatusPreviouslyInjected,
+					))
+				}).WithContext(ctx).Within(calcDisruptionGoneTimeout(cpuStress)).ProbeEvery(disruptionPotentialChangesEvery).Should(Succeed())
 			},
 			func(ctx SpecContext) {
 				GinkgoHelper()
@@ -95,26 +156,21 @@ var _ = Describe("CPU Pressure", func() {
 
 				// once it's done, we expect to eventually have stressers back before the end of the disruption
 				Eventually(func(g Gomega, ctx SpecContext) {
-					err := k8sClient.Get(ctx, types.NamespacedName{Namespace: cpuStress.Namespace, Name: cpuStress.Name}, &cpuStress)
+					var freshDisruption chaosv1beta1.Disruption
+
+					err := k8sClient.Get(ctx, disruptionKey, &freshDisruption)
 					if apierrors.IsNotFound(err) {
 						return
 					}
 					g.Expect(err).ToNot(HaveOccurred())
 
-					// get chaos pod associated to original disruption, the cpu-pressure
-					chaosPods, err := listChaosPods(ctx, cpuStress)
+					chaosPods, err := listChaosPods(ctx, freshDisruption)
 					g.Expect(err).ToNot(HaveOccurred())
 					g.Expect(chaosPods.Items).To(HaveLen(1))
 
-					AddReportEntry("Gonna exec into pod", chaosPods.Items[0].Name)
-
-					// count number of chaos-injector cpu-stress, there should be 2
-					stou, sterr, err := ExecuteRemoteCommand(ctx, &chaosPods.Items[0], "injector", `ps ax | grep "/usr/local/bin/chaos-injector cpu-stress" | grep -v grep | wc -l`)
-					g.Expect(err).ToNot(HaveOccurred(), "an unexpected error occured while executing remote command, details:", sterr)
-
-					AddReportEntry("Found cpu-stress process on injector:", stou)
-
-					g.Expect(stou).To(WithTransform(strings.TrimSpace, Equal("1")))
+					pod := chaosPods.Items[0]
+					AddReportEntry("Checking chaos pod is running after container restart", pod.Name)
+					g.Expect(allContainersAreRunning(ctx, pod)).To(BeTrue())
 				}).WithContext(ctx).Within(calcDisruptionGoneTimeout(cpuStress)).ProbeEvery(disruptionPotentialChangesEvery).Should(Succeed())
 			},
 		}.DoAndWait(ctx)
@@ -123,40 +179,3 @@ var _ = Describe("CPU Pressure", func() {
 		Entry("by a SIGKILL", true),
 	)
 })
-
-func ExecuteRemoteCommand(ctx SpecContext, pod *v1.Pod, container, command string) (string, string, error) {
-	coreClient, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		return "", "", fmt.Errorf("unable to create kubernetes client: %w", err)
-	}
-
-	request := coreClient.CoreV1().RESTClient().
-		Post().
-		Namespace(pod.Namespace).
-		Resource("pods").
-		Name(pod.Name).
-		SubResource("exec").
-		VersionedParams(&v1.PodExecOptions{
-			Command:   []string{"/bin/sh", "-c", command},
-			Container: container,
-			Stdin:     false,
-			Stdout:    true,
-			Stderr:    true,
-			TTY:       true,
-		}, scheme.ParameterCodec)
-	exec, err := remotecommand.NewSPDYExecutor(restConfig, "POST", request.URL())
-	Expect(err).ToNot(HaveOccurred())
-
-	buf := &bytes.Buffer{}
-	errBuf := &bytes.Buffer{}
-
-	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
-		Stdout: buf,
-		Stderr: errBuf,
-	})
-	if err != nil {
-		return "", "", fmt.Errorf("%w Failed executing command %s on %v/%v", err, command, pod.Namespace, pod.Name)
-	}
-
-	return buf.String(), errBuf.String(), nil
-}

@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package network
 
@@ -10,6 +10,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/DataDog/chaos-controller/o11y/tags"
 	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
 	"golang.org/x/sys/unix"
@@ -84,7 +85,7 @@ func (a netlinkAdapter) LinkList(useLocalhost bool, log *zap.SugaredLogger) ([]N
 	nlinks := []NetlinkLink{}
 
 	for _, link := range links {
-		log.Debugw("listing available links...", "linkName", link.Attrs().Name)
+		log.Debugw("listing available links...", tags.LinkNameKey, link.Attrs().Name)
 		// ignore non local ethernet interfaces according to
 		// the v197 systemd/udev naming standards
 		// https://systemd.io/PREDICTABLE_INTERFACE_NAMES/
@@ -125,6 +126,19 @@ func (a netlinkAdapter) LinkByName(name string) (NetlinkLink, error) {
 	return newNetlinkLink(link), nil
 }
 
+// isDefaultDst reports whether the destination corresponds to the default route.
+// Older netlink versions left Dst nil for default routes; newer versions
+// (vishvananda/netlink v1.3+) populate it with the zero IP and a /0 mask.
+func isDefaultDst(dst *net.IPNet) bool {
+	if dst == nil {
+		return true
+	}
+
+	ones, _ := dst.Mask.Size()
+
+	return ones == 0 && dst.IP.IsUnspecified()
+}
+
 func (a netlinkAdapter) DefaultRoutes() ([]NetlinkRoute, error) {
 	defaultRoutes := []NetlinkRoute{}
 
@@ -133,19 +147,22 @@ func (a netlinkAdapter) DefaultRoutes() ([]NetlinkRoute, error) {
 		return nil, fmt.Errorf("error listing routes: %w", err)
 	}
 
-	// find the default route, the one with no source nor destination
+	// find the default route, identified by a /0 prefix (or no destination on older
+	// netlink versions) and a non-nil gateway.
 	for _, route := range routes {
-		if route.Dst == nil && route.Gw != nil {
-			link, err := netlink.LinkByIndex(route.LinkIndex)
-			if err != nil {
-				return nil, fmt.Errorf("error identifying default route link: %w", err)
-			}
-
-			defaultRoutes = append(defaultRoutes, netlinkRoute{
-				link: newNetlinkLink(link),
-				gw:   route.Gw,
-			})
+		if !isDefaultDst(route.Dst) || route.Gw == nil {
+			continue
 		}
+
+		link, err := netlink.LinkByIndex(route.LinkIndex)
+		if err != nil {
+			return nil, fmt.Errorf("error identifying default route link: %w", err)
+		}
+
+		defaultRoutes = append(defaultRoutes, netlinkRoute{
+			link: newNetlinkLink(link),
+			gw:   route.Gw,
+		})
 	}
 
 	if len(defaultRoutes) == 0 {

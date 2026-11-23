@@ -1,3 +1,63 @@
+# Global build arguments for FROM statements
+ARG BUILDGOVERSION=1.26.2
+
+# Stage for building EBPF programs
+FROM ubuntu:24.04 AS ebpf-builder
+
+ARG TARGETARCH
+ARG BUILDGOVERSION=1.26.2
+
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    curl \
+    pahole \
+    dwarves \
+    make \
+    clang \
+    libelf-dev \
+    libbpf-dev \
+    llvm
+
+# Install i386 libs for amd64
+RUN ([ "${TARGETARCH}" = "amd64" ] && apt-get install -y libc6-dev-i386) || true
+
+# Install Go
+ENV TARGETARCH=${TARGETARCH} BUILDGOVERSION=${BUILDGOVERSION}
+WORKDIR /tmp
+COPY ./scripts/install-go /tmp/install-go
+RUN /tmp/install-go && rm -f /tmp/install-go
+
+# Copy EBPF source and build
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+WORKDIR /app/ebpf
+RUN make all
+
+# Build stage for Go binary
+FROM golang:${BUILDGOVERSION} AS go-builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH
+
+WORKDIR /go/src/github.com/chaos-controller/
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the source code
+COPY . .
+
+# Build the injector binary
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -o bin/injector/injector ./cli/injector
+
+# Stage for system binaries and libraries
 FROM ubuntu:24.04 AS binaries
 
 RUN apt-get update && \
@@ -19,8 +79,8 @@ RUN apt-get update && \
     chmod +x bpftool && \
     mv bpftool /usr/bin/bpftool-amd64
 
-
-FROM gcr.io/distroless/python3-debian12:latest
+# Final stage
+FROM gcr.io/distroless/python3-debian13:latest
 
 ARG TARGETARCH
 
@@ -41,17 +101,18 @@ COPY --from=binaries /usr/lib/x86_64-linux-gn[u] /usr/lib/x86_64-linux-gnu/
 # no more sh
 COPY --from=binaries /usr/bin/test /bin/sh
 
-COPY injector_${TARGETARCH} /usr/local/bin/chaos-injector
-COPY injector_${TARGETARCH} /usr/local/bin/injector
+# Copy the Go binary wrifrom the builder stage with execute permissions
+COPY --chmod=100 --from=go-builder /go/src/github.com/chaos-controller/bin/injector/injector /usr/local/bin/chaos-injector
+COPY --chmod=100 --from=go-builder /go/src/github.com/chaos-controller/bin/injector/injector /usr/local/bin/injector
 
-COPY dns_disruption_resolver.py /usr/local/bin/dns_disruption_resolver.py
-COPY ebpf/${TARGETARCH}/ /usr/local/bin/
+# Copy EBPF binaries from the EBPF builder stage with execute permissions
+COPY --chmod=100 --from=ebpf-builder /app/bin/injector/ebpf/${TARGETARCH}/ /usr/local/bin/
 
 ENTRYPOINT ["/usr/local/bin/chaos-injector"]
 
 LABEL baseimage.os="debian"
 LABEL baseimage.isgbi="custom"
-LABEL baseimage.name="gcr.io/distroless/python3-debian12:latest"
+LABEL baseimage.name="gcr.io/distroless/python3-debian13:latest"
 
 ARG BUILDSTAMP
 LABEL baseimage.buildstamp="${BUILDSTAMP}"

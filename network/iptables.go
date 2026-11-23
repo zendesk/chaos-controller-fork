@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package network
 
@@ -11,13 +11,15 @@ import (
 
 	goiptables "github.com/coreos/go-iptables/iptables"
 	"go.uber.org/zap"
+
+	"github.com/DataDog/chaos-controller/o11y/tags"
 )
 
 // IPTables is an interface for interacting with target nat firewall/iptables rules
 type IPTables interface {
 	Clear() error
 	LogConntrack() error
-	RedirectTo(protocol string, port string, destinationIP string) error
+	RedirectTo(protocol string, port string, destination string) error
 	Intercept(protocol string, port string, cgroupPath string, cgroupClassID string, injectorPodIP string) error
 	MarkCgroupPath(cgroupPath string, mark string) error
 	MarkClassID(classid string, mark string) error
@@ -54,7 +56,7 @@ func NewIPTables(log *zap.SugaredLogger, dryRun bool) (IPTables, error) {
 
 // Clear removes any previously injected rules in any chain and table
 func (i *iptables) Clear() error {
-	i.log.Infow("deleting injected iptables rules", "chain", chaosChainName)
+	i.log.Infow("deleting injected iptables rules", tags.ChainKey, chaosChainName)
 
 	if i.dryRun {
 		return nil
@@ -62,7 +64,7 @@ func (i *iptables) Clear() error {
 
 	// remove previously injected rules
 	for _, r := range i.injectedRules {
-		i.log.Infow("trying to delete injected iptables rule", "chain", r.chain, "table", r.table, "rulespec", r.rulespec)
+		i.log.Infow("trying to delete injected iptables rule", tags.ChainKey, r.chain, tags.TableKey, r.table, tags.RuleSpecKey, r.rulespec)
 
 		// delete rule
 		if err := i.ip.Delete(r.table, r.chain, r.rulespec...); err != nil {
@@ -73,7 +75,7 @@ func (i *iptables) Clear() error {
 			}
 
 			if !exists {
-				i.log.Infow("iptables rule doesn't exist anymore, skipping cleaning", "table", r.table, "chain", r.chain, "rulespec", r.rulespec)
+				i.log.Infow("iptables rule doesn't exist anymore, skipping cleaning", tags.TableKey, r.table, tags.ChainKey, r.chain, tags.RuleSpecKey, r.rulespec)
 
 				continue
 			}
@@ -97,8 +99,8 @@ func (i *iptables) LogConntrack() error {
 }
 
 // RedirectTo redirects the matching packets to the given destination IP
-func (i *iptables) RedirectTo(protocol string, port string, destinationIP string) error {
-	return i.insert("nat", chaosChainName, "-p", protocol, "--dport", port, "-j", "DNAT", "--to-destination", destinationIP+":"+port)
+func (i *iptables) RedirectTo(protocol string, port string, destination string) error {
+	return i.insert("nat", chaosChainName, "-p", protocol, "--dport", port, "-j", "DNAT", "--to-destination", destination)
 }
 
 // Intercept jumps the matching packets to the injector dedicated chain except for
@@ -168,7 +170,7 @@ func (i *iptables) MarkClassID(classID string, mark string) error {
 // for further cleanup and inserts the rule in the given table and chain
 // at the first position
 func (i *iptables) insert(table string, chain string, rulespec ...string) error {
-	i.log.Infow("injecting iptables rule", "table", table, "chain", chain, "rulespec", rulespec)
+	i.log.Infow("injecting iptables rule", tags.TableKey, table, tags.ChainKey, chain, tags.RuleSpecKey, rulespec)
 
 	if i.dryRun {
 		return nil
@@ -195,7 +197,7 @@ func (i *iptables) insert(table string, chain string, rulespec ...string) error 
 	}
 
 	if exists {
-		i.log.Infow("iptables rule already exists, skipping", "table", table, "chain", chain, "rulespec", rulespec)
+		i.log.Infow("iptables rule already exists, skipping", tags.TableKey, table, tags.ChainKey, chain, tags.RuleSpecKey, rulespec)
 
 		return nil
 	}

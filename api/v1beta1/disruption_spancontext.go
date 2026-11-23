@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package v1beta1
 
@@ -24,10 +24,10 @@ var (
 )
 
 // SpanContext extracts this disruption's span context, injects it in the given context, then returns it
-func (r *Disruption) SpanContext(ctx context.Context) (context.Context, error) {
+func (d *Disruption) SpanContext(ctx context.Context) (context.Context, error) {
 	var annotation propagation.MapCarrier
 
-	spanContext, ok := r.Annotations[annotationSpanContextKey]
+	spanContext, ok := d.Annotations[annotationSpanContextKey]
 	if !ok {
 		return ctx, ErrNoSpanContext
 	}
@@ -43,7 +43,7 @@ func (r *Disruption) SpanContext(ctx context.Context) (context.Context, error) {
 }
 
 // SetSpanContext store provided spanContext into expected disruption annotation
-func (r *Disruption) SetSpanContext(ctx context.Context) error {
+func (d *Disruption) SetSpanContext(ctx context.Context) error {
 	var annotation = make(propagation.MapCarrier)
 
 	otel.GetTextMapPropagator().Inject(ctx, annotation)
@@ -53,7 +53,7 @@ func (r *Disruption) SetSpanContext(ctx context.Context) error {
 		return fmt.Errorf("unable to marshal span context: %w", err)
 	}
 
-	r.Annotations[annotationSpanContextKey] = string(marshaledAnnotation)
+	d.Annotations[annotationSpanContextKey] = string(marshaledAnnotation)
 
 	return nil
 }

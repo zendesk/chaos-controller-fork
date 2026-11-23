@@ -1,16 +1,18 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package main
 
 import (
 	"fmt"
 
-	"github.com/DataDog/chaos-controller/injector"
-	"github.com/DataDog/chaos-controller/process"
 	"github.com/spf13/cobra"
+
+	"github.com/DataDog/chaos-controller/injector"
+	"github.com/DataDog/chaos-controller/o11y/tags"
+	"github.com/DataDog/chaos-controller/process"
 )
 
 const (
@@ -26,12 +28,13 @@ var cpuPressureStressCmd = &cobra.Command{
 		if len(configs) != 1 {
 			return fmt.Errorf("%s expect a single target configuration, found %d", cpuStressCommandName, len(configs))
 		}
+
 		config := configs[0]
 
 		percentage, _ := cmd.Flags().GetInt(percentageFlagName)
 
-		log = log.With("percentage", percentage)
-		log.Infow("stressing every CPU allocated to target", "disruption_target", config.TargetName())
+		log = log.With(tags.PercentageKey, percentage)
+		log.Infow("stressing every CPU allocated to target", tags.TargetNameKey, config.TargetName())
 
 		runtime := process.NewRuntime(config.Disruption.DryRun)
 		process := process.NewManager(config.Disruption.DryRun)

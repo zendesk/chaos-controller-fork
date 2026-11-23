@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package watchers
 
@@ -10,6 +10,7 @@ import (
 	"time"
 
 	chaosv1beta1 "github.com/DataDog/chaos-controller/api/v1beta1"
+	"github.com/DataDog/chaos-controller/o11y/tags"
 	"go.uber.org/zap"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -98,10 +99,10 @@ func (h DeploymentHandler) FetchAssociatedDisruptionRollouts(deployment *appsv1.
 	// It would be more efficient to use label selectors,
 	// however it would require a webhook to add those labels when new rollouts are created
 	disruptionRollouts := &chaosv1beta1.DisruptionRolloutList{}
-	err := h.Client.List(context.Background(), disruptionRollouts, client.MatchingFields{"targetResource": indexedValue})
 
+	err := h.Client.List(context.Background(), disruptionRollouts, client.MatchingFields{"targetResource": indexedValue})
 	if err != nil {
-		h.log.Errorw("unable to fetch DisruptionRollouts using index", "error", err, "indexedValue", indexedValue)
+		h.log.Errorw("unable to fetch DisruptionRollouts using index", tags.ErrorKey, err, tags.IndexedValueKey, indexedValue)
 		return nil, err
 	}
 
@@ -111,7 +112,7 @@ func (h DeploymentHandler) FetchAssociatedDisruptionRollouts(deployment *appsv1.
 func (h DeploymentHandler) HasAssociatedDisruptionRollout(deployment *appsv1.Deployment) (bool, error) {
 	disruptionRollouts, err := h.FetchAssociatedDisruptionRollouts(deployment)
 	if err != nil {
-		h.log.Errorw("unable to check for associated DisruptionRollout", "Deployment", deployment.Name, "error", err)
+		h.log.Errorw("unable to check for associated DisruptionRollout", tags.DeploymentNameKey, deployment.Name, tags.ErrorKey, err)
 		return false, err
 	}
 
@@ -131,7 +132,7 @@ func (h DeploymentHandler) UpdateDisruptionRolloutStatus(deployment *appsv1.Depl
 
 		err = h.Client.Status().Update(context.Background(), &dr)
 		if err != nil {
-			h.log.Errorw("unable to update DisruptionRollout status", "DisruptionRollout", dr.Name, "error", err)
+			h.log.Errorw("unable to update DisruptionRollout status", tags.DisruptionRolloutNameKey, dr.Name, tags.ErrorKey, err)
 			return err
 		}
 	}

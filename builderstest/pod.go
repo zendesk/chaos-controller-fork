@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package builderstest_test
 
@@ -87,7 +87,7 @@ func (p *PodBuilder) Parent() PodsBuilder {
 
 // TerminatedWith sets the termination state of the container in the Pod to a terminated state with the specified exit code.
 func (p *PodBuilder) TerminatedWith(exitCode int32) *PodBuilder {
-	p.Pod.Status.ContainerStatuses[0].State.Terminated = &v1.ContainerStateTerminated{
+	p.Status.ContainerStatuses[0].State.Terminated = &v1.ContainerStateTerminated{
 		ExitCode: exitCode,
 	}
 

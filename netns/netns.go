@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package netns
 
@@ -11,6 +11,7 @@ import (
 	"runtime"
 
 	"github.com/DataDog/chaos-controller/env"
+	"github.com/DataDog/chaos-controller/o11y/tags"
 	"github.com/vishvananda/netns"
 	"go.uber.org/zap"
 )
@@ -49,7 +50,11 @@ func NewManager(log *zap.SugaredLogger, pid uint32) (Manager, error) {
 		return nil, fmt.Errorf("error getting given PID (%d) network namespace from path %s: %w", pid, targetPath, err)
 	}
 
-	log.Debugw("Retrieved root namespace and target namespace", "rootns", int(rootns), "targetns", int(targetns), "targetnsPath", fmt.Sprintf("%s%d/ns/net", mountProc, pid))
+	log.Debugw("Retrieved root namespace and target namespace",
+		tags.RootNsKey, int(rootns),
+		tags.TargetNsKey, int(targetns),
+		tags.TargetNsPathKey, fmt.Sprintf("%s%d/ns/net", mountProc, pid),
+	)
 
 	// build manager
 	mgr := manager{

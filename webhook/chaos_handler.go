@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package webhook
 
@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/DataDog/chaos-controller/o11y/tags"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -24,7 +25,7 @@ type ChaosHandlerMutator struct {
 	Image        string
 	Timeout      time.Duration
 	MaxTimeout   time.Duration
-	Decoder      *admission.Decoder
+	Decoder      admission.Decoder
 	ResourceList *corev1.ResourceList
 }
 
@@ -41,7 +42,7 @@ func (m *ChaosHandlerMutator) Handle(ctx context.Context, req admission.Request)
 	// decode pod object
 	err := m.Decoder.Decode(req, pod)
 	if err != nil {
-		m.Log.Errorw("error decoding pod object", "error", err, "podName", pod.Name, "podNamespace", pod.Namespace)
+		m.Log.Errorw("error decoding pod object", tags.ErrorKey, err, tags.PodNameKey, pod.Name, tags.PodNamespaceKey, pod.Namespace)
 
 		return admission.Errored(http.StatusBadRequest, err)
 	}
@@ -52,7 +53,7 @@ func (m *ChaosHandlerMutator) Handle(ctx context.Context, req admission.Request)
 	// the logged pod name will then be the pod prefix instead of the full name
 	podName := pod.Name
 	if podName == "" {
-		podName = pod.ObjectMeta.GenerateName
+		podName = pod.GenerateName
 	}
 
 	handlerTimeout := m.Timeout.String()
@@ -62,7 +63,7 @@ func (m *ChaosHandlerMutator) Handle(ctx context.Context, req admission.Request)
 	if ok {
 		if timeoutOverride, err := time.ParseDuration(timeoutLabel); err == nil {
 			if timeoutOverride > m.MaxTimeout {
-				m.Log.Warnw("pod was rejected due to handler timeout set too high", "timeout", timeoutOverride.String(), "maxTimeout", m.MaxTimeout.String())
+				m.Log.Warnw("pod was rejected due to handler timeout set too high", tags.TimeoutKey, timeoutOverride.String(), tags.MaxTimeoutKey, m.MaxTimeout.String())
 				err = fmt.Errorf("you have requested a handler timeout of %s but the maximum allowed timeout is %s", timeoutOverride.String(), m.MaxTimeout.String())
 
 				return admission.Errored(http.StatusBadRequest, err)
@@ -70,7 +71,7 @@ func (m *ChaosHandlerMutator) Handle(ctx context.Context, req admission.Request)
 
 			handlerTimeout = timeoutOverride.String()
 		} else if err != nil {
-			m.Log.Warnw("could not parse user's disrupt-on-init-timeout annotation", "err", err, "podName", podName, "podNamespace", req.Namespace)
+			m.Log.Warnw("could not parse user's disrupt-on-init-timeout annotation", tags.ErrorKey, err, tags.PodNameKey, podName, tags.PodNamespaceKey, req.Namespace)
 		}
 	}
 
@@ -79,7 +80,7 @@ func (m *ChaosHandlerMutator) Handle(ctx context.Context, req admission.Request)
 		succeedOnTimeout = "--succeed-on-timeout"
 	}
 
-	m.Log.Infow("injecting chaos handler init container into targeted pod", "podName", podName, "podNamespace", req.Namespace)
+	m.Log.Infow("injecting chaos handler init container into targeted pod", tags.PodNameKey, podName, tags.PodNamespaceKey, req.Namespace)
 
 	// build chaos handler init container
 	init := corev1.Container{
@@ -102,7 +103,7 @@ func (m *ChaosHandlerMutator) Handle(ctx context.Context, req admission.Request)
 
 	marshaledPod, err := json.Marshal(pod)
 	if err != nil {
-		m.Log.Errorw("error encoding modified pod object", "error", err, "podName", pod.Name, "podNamespace", pod.Namespace)
+		m.Log.Errorw("error encoding modified pod object", tags.ErrorKey, err, tags.PodNameKey, pod.Name, tags.PodNamespaceKey, pod.Namespace)
 
 		return admission.Errored(http.StatusInternalServerError, err)
 	}

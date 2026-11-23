@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package injector_test
 
@@ -120,9 +120,13 @@ var _ = Describe("CPU pressure", func() {
 		})
 
 		It("succeed and call stop after proper inject", func() {
+			doneCh := make(chan struct{})
+			close(doneCh)
+
 			background.EXPECT().Start().Return(nil).Once()
 			background.EXPECT().KeepAlive().Once()
 			background.EXPECT().Stop().Return(nil).Once()
+			background.EXPECT().Done().Return((<-chan struct{})(doneCh)).Once()
 
 			inj := NewCPUPressureInjector(config, "100%", factory, args)
 

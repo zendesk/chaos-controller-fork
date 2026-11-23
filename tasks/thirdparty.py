@@ -3,7 +3,7 @@
 # Unless explicitly stated otherwise all files in this repository are licensed
 # under the Apache License Version 2.0.
 # This product includes software developed at Datadog (https://www.datadoghq.com/).
-# Copyright 2025 Datadog, Inc.
+# Copyright 2026 Datadog, Inc.
 
 import csv
 import glob
@@ -51,6 +51,8 @@ def license_check(ctx):
             license_filename = None
             if os.path.isfile('{}/LICENSE'.format(base_path)):
                 license_filename = '{}/LICENSE'.format(base_path)
+            elif os.path.isfile('{}/COPYING'.format(base_path)):
+                license_filename = '{}/COPYING'.format(base_path)
             else:
                 license_files = glob.glob('{}/LICENSE.*'.format(base_path))
                 if len(license_files) > 1:

@@ -1,7 +1,7 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package v1beta1
 
@@ -10,11 +10,12 @@ import (
 	"fmt"
 	"strings"
 
+	authV1 "k8s.io/api/authentication/v1"
 	"k8s.io/api/authentication/v1beta1"
+	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	authV1 "k8s.io/api/authentication/v1"
-	metaV1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/DataDog/chaos-controller/o11y/tags"
 )
 
 const (
@@ -27,13 +28,13 @@ var (
 )
 
 // UserInfo returns extracted user info informations or an error if not available or invalid
-func (r *Disruption) UserInfo() (authV1.UserInfo, error) {
-	return getUserInfo(r.GetObjectMeta())
+func (d *Disruption) UserInfo() (authV1.UserInfo, error) {
+	return getUserInfo(d.GetObjectMeta())
 }
 
 // SetUserInfo store provided userInfo into expected disruption annotation
-func (r *Disruption) SetUserInfo(userInfo authV1.UserInfo) error {
-	return setUserInfo(userInfo, r)
+func (d *Disruption) SetUserInfo(userInfo authV1.UserInfo) error {
+	return setUserInfo(userInfo, d)
 }
 
 // UserInfo returns extracted user info informations or an error if not available or invalid
@@ -141,12 +142,17 @@ func validateUserInfoGroup(object client.Object, permittedGroups map[string]stru
 	objectKind := object.GetObjectKind().GroupVersionKind().Kind
 
 	if allowedGroups := filterUserGroupsByPermitted(userInfo, permittedGroups); len(allowedGroups) > 0 {
-		logger.Debugw(fmt.Sprintf("permitting user %s creation, due to group membership", objectKind), "groups", strings.Join(allowedGroups, ", "))
+		logger.Debugw(fmt.Sprintf("permitting user %s creation, due to group membership", objectKind),
+			tags.GroupsKey, strings.Join(allowedGroups, ", "),
+		)
 
 		return nil
 	}
 
-	logger.Warnw(fmt.Sprintf("rejecting user from creating this %s", objectKind), "permittedUserGroups", permittedGroupsString, "userGroups", userInfo.Groups)
+	logger.Warnw(fmt.Sprintf("rejecting user from creating this %s", objectKind),
+		tags.PermittedUserGroupsKey, permittedGroupsString,
+		tags.UserGroupsKey, userInfo.Groups,
+	)
 
 	return fmt.Errorf(
 		"lacking sufficient authorization to create %s. your user groups are %s, but you must be in one of the following groups: %s",

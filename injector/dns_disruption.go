@@ -1,23 +1,23 @@
 // Unless explicitly stated otherwise all files in this repository are licensed
 // under the Apache License Version 2.0.
 // This product includes software developed at Datadog (https://www.datadoghq.com/).
-// Copyright 2025 Datadog, Inc.
+// Copyright 2026 Datadog, Inc.
 
 package injector
 
 import (
-	"context"
+	"bufio"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
 
 	"github.com/DataDog/chaos-controller/api/v1beta1"
-	"github.com/DataDog/chaos-controller/command"
 	"github.com/DataDog/chaos-controller/env"
 	"github.com/DataDog/chaos-controller/network"
-	"github.com/DataDog/chaos-controller/process"
-	chaostypes "github.com/DataDog/chaos-controller/types"
+	"github.com/DataDog/chaos-controller/o11y/tags"
+	"github.com/DataDog/chaos-controller/types"
 )
 
 var (
@@ -25,114 +25,221 @@ var (
 	launchDNSServerErr error
 )
 
-// DNSDisruptionInjector describes a dns disruption
-type DNSDisruptionInjector struct {
-	spec   v1beta1.DNSDisruptionSpec
-	config DNSDisruptionInjectorConfig
+// ResetDNSServerOnce resets the global DNS server sync.Once to allow restarts (e.g., pulsing).
+// Tests also use this to avoid cross-test state.
+func ResetDNSServerOnce() {
+	launchDNSServer = sync.Once{}
+	launchDNSServerErr = nil
 }
 
-// DNSDisruptionInjectorConfig contains all needed drivers to create a dns disruption using `iptables`
+// dnsDisruptionInjector describes a DNS disruption injector
+type dnsDisruptionInjector struct {
+	spec      v1beta1.DNSDisruptionSpec
+	config    DNSDisruptionInjectorConfig
+	responder network.DNSResponder
+}
+
+// DNSDisruptionInjectorConfig contains needed drivers to create a DNS disruption injector
 type DNSDisruptionInjectorConfig struct {
 	Config
-	DisruptionName      string
-	DisruptionNamespace string
-	TargetName          string
-	FileWriter          FileWriter
-	IPTables            network.IPTables
-	CmdFactory          command.Factory
-	ProcessManager      process.Manager
+	IPTables  network.IPTables
+	Responder network.DNSResponder // Optional: for testing. If nil, creates real DNS responder
 }
 
-// NewDNSDisruptionInjector creates a DNSDisruptionInjector object with the given config,
-// missing fields are initialized with the defaults
-func NewDNSDisruptionInjector(spec v1beta1.DNSDisruptionSpec, config DNSDisruptionInjectorConfig) (Injector, error) {
-	var err error
-	if config.IPTables == nil {
-		config.IPTables, err = network.NewIPTables(config.Log, config.Disruption.DryRun)
+// NewDNSDisruptionInjector creates a DNSDisruptionInjector object with the given config
+func NewDNSDisruptionInjector(spec v1beta1.DNSDisruptionSpec, config DNSDisruptionInjectorConfig) Injector {
+	return &dnsDisruptionInjector{
+		spec:   spec,
+		config: config,
 	}
+}
 
-	if config.FileWriter == nil {
-		config.FileWriter = standardFileWriter{
-			dryRun: config.Disruption.DryRun,
+// convertToResponderRecords converts API spec records to DNSRecordEntry format
+func convertToResponderRecords(records []v1beta1.DNSRecord) []network.DNSRecordEntry {
+	entries := make([]network.DNSRecordEntry, len(records))
+	for i, record := range records {
+		entries[i] = network.DNSRecordEntry{
+			Hostname:   record.Hostname,
+			RecordType: strings.ToUpper(strings.TrimSpace(record.Record.Type)),
+			Value:      record.Record.Value,
+			TTL:        record.Record.TTL,
 		}
 	}
 
-	if config.CmdFactory == nil {
-		config.CmdFactory = command.NewFactory(config.Disruption.DryRun)
+	return entries
+}
+
+// getUpstreamDNSFromResolvConf reads the target pod's /etc/resolv.conf to get all upstream DNS servers
+// Returns a comma-separated list of nameservers, or "8.8.8.8:53" as fallback
+func getUpstreamDNSFromResolvConf(resolvConfPath string) string {
+	const defaultDNS = "8.8.8.8:53"
+
+	file, err := os.Open(resolvConfPath)
+	if err != nil {
+		return defaultDNS
 	}
 
-	if config.ProcessManager == nil {
-		config.ProcessManager = process.NewManager(config.Disruption.DryRun)
+	defer func() {
+		_ = file.Close()
+	}()
+
+	var nameservers []string
+
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Look for nameserver entries
+		if strings.HasPrefix(line, "nameserver") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 {
+				nameserver := fields[1]
+
+				// If already has brackets (e.g., [::1]:53), it's formatted correctly
+				if strings.HasPrefix(nameserver, "[") {
+					nameservers = append(nameservers, nameserver)
+					continue
+				}
+
+				// Try to parse as IP to detect IPv6
+				if ip := net.ParseIP(nameserver); ip != nil && ip.To4() == nil {
+					// It's an IPv6 address without brackets - add them with port
+					nameserver = fmt.Sprintf("[%s]:53", nameserver)
+				} else if !strings.Contains(nameserver, ":") {
+					// IPv4 without port - add port
+					nameserver += ":53"
+				}
+
+				nameservers = append(nameservers, nameserver)
+			}
+		}
 	}
 
-	return &DNSDisruptionInjector{
-		spec:   spec,
-		config: config,
-	}, err
+	// Return all nameservers as comma-separated list for redundancy
+	if len(nameservers) > 0 {
+		return strings.Join(nameservers, ",")
+	}
+
+	return defaultDNS
 }
 
-func (i *DNSDisruptionInjector) TargetName() string {
-	return i.config.Config.TargetName()
+func (i *dnsDisruptionInjector) TargetName() string {
+	return i.config.TargetName()
 }
 
-func (i *DNSDisruptionInjector) GetDisruptionKind() chaostypes.DisruptionKindName {
-	return chaostypes.DisruptionKindDNSDisruption
+func (i *dnsDisruptionInjector) GetDisruptionKind() types.DisruptionKindName {
+	return types.DisruptionKindDNSDisruption
 }
 
-// Inject injects the given dns disruption into the given container
-func (i *DNSDisruptionInjector) Inject() error {
-	i.config.Log.Infow("adding dns disruption", "spec", i.spec)
+// Inject starts the DNS responder and configures IPTables to redirect DNS traffic
+func (i *dnsDisruptionInjector) Inject() error {
+	if i.config.Disruption.Level != types.DisruptionLevelPod {
+		return fmt.Errorf("DNS disruptions can only be applied at the pod level")
+	}
+
+	// Dry run mode - log what would happen without making changes
+	if i.config.Disruption.DryRun {
+		i.config.Log.Infow("injecting DNS disruption in dry run mode",
+			tags.ContainerKey, i.config.TargetContainer.Name(),
+			tags.DNSRecordCountKey, len(i.spec.Records),
+			tags.PortKey, i.spec.Port,
+			tags.ProtocolKey, i.spec.Protocol,
+		)
+
+		// Log each record that would be disrupted
+		for _, record := range i.spec.Records {
+			i.config.Log.Infow("would disrupt DNS record",
+				tags.DNSHostnameKey, record.Hostname,
+				tags.TypeKey, record.Record.Type,
+				tags.ValueKey, record.Record.Value,
+				tags.DNSTTLKey, record.Record.TTL,
+			)
+		}
+
+		i.config.Log.Infow("dry run: would start DNS responder and configure IPTables rules")
+
+		return nil
+	}
+
+	i.config.Log.Infow("injecting DNS disruption",
+		tags.ContainerKey, i.config.TargetContainer.Name(),
+		tags.DNSRecordCountKey, len(i.spec.Records),
+	)
 
 	// get the chaos pod node IP from the environment variable
-	podIP, ok := os.LookupEnv(env.InjectorChaosPodIP)
+	chaosPodIP, ok := os.LookupEnv(env.InjectorChaosPodIP)
 	if !ok {
 		return fmt.Errorf("%s environment variable must be set with the chaos pod IP", env.InjectorChaosPodIP)
 	}
 
-	// Create a Fake DNS server, once
+	// Determine ports (use helper method for consistency)
+	dnsPort := i.spec.GetPortWithDefault()
+
+	// Determine protocol (use helper method for consistency)
+	protocol := i.spec.GetProtocolWithDefault()
+
+	// DNS responder runs on different ports to avoid conflicts
+	// We'll redirect from dnsPort to responder ports via IPTables
+	// When protocol is "both", UDP and TCP need separate ports
+	const baseResponderPort = 5353
+
+	udpPort := baseResponderPort
+	tcpPort := baseResponderPort
+
+	if protocol == "both" {
+		tcpPort = baseResponderPort + 1 // TCP uses 5354
+	}
+
+	i.config.Log.Infow("DNS responder ports",
+		tags.UDPPortKey, udpPort,
+		tags.TCPPortKey, tcpPort,
+		tags.ProtocolKey, protocol,
+		tags.ChaosPodIPKey, chaosPodIP,
+	)
+
 	launchDNSServer.Do(func() {
-		// Set up resolver config file
-		resolverConfig := []string{}
-		for _, record := range i.spec {
-			resolverConfig = append(resolverConfig, fmt.Sprintf("%s %s %s", record.Record.Type, record.Hostname, record.Record.Value))
+		// Get upstream DNS from target container's resolv.conf
+		targetPID := i.config.TargetContainer.PID()
+		resolvConfPath := fmt.Sprintf("/proc/%d/root/etc/resolv.conf", targetPID)
+		upstreamDNS := getUpstreamDNSFromResolvConf(resolvConfPath)
+
+		i.config.Log.Infow("resolved upstream DNS server",
+			tags.UpstreamDNSKey, upstreamDNS,
+			tags.ResolvConfPathKey, resolvConfPath,
+		)
+
+		// Create and start DNS responder in the target's network namespace
+		responderConfig := network.DNSResponderConfig{
+			Records:     convertToResponderRecords(i.spec.Records),
+			UDPPort:     udpPort,
+			TCPPort:     tcpPort,
+			Protocol:    protocol,
+			UpstreamDNS: upstreamDNS,
+			Logger:      i.config.Log,
 		}
 
-		if err := i.config.FileWriter.Write("/tmp/dns.conf", 0o644, strings.Join(resolverConfig, "\n")); err != nil {
-			launchDNSServerErr = fmt.Errorf("unable to write resolver config: %w", err)
-			return
+		// Use provided responder if available (for testing), otherwise create real one
+		if i.config.Responder != nil {
+			i.responder = i.config.Responder
+		} else {
+			i.responder = network.NewDNSResponder(responderConfig)
 		}
 
-		args := []string{"/usr/local/bin/dns_disruption_resolver.py", "-c", "/tmp/dns.conf"}
+		i.config.Log.Infow("starting DNS responder in target network namespace",
+			tags.UDPPortKey, udpPort,
+			tags.TCPPortKey, tcpPort,
+			tags.ProtocolKey, protocol,
+		)
 
-		if i.config.Disruption.DisruptionName != "" {
-			args = append(args, "--log-context-disruption-name", i.config.Disruption.DisruptionName)
-		}
+		if err := i.responder.Start(); err != nil {
+			launchDNSServerErr = fmt.Errorf("failed to start DNS responder: %w", err)
 
-		if i.config.Disruption.DisruptionNamespace != "" {
-			args = append(args, "--log-context-disruption-namespace", i.config.Disruption.DisruptionNamespace)
-		}
-
-		if i.config.Disruption.TargetName != "" {
-			args = append(args, "--log-context-target-name", i.config.Disruption.TargetName)
-		}
-
-		if i.config.Disruption.TargetNodeName != "" {
-			args = append(args, "--log-context-target-node-name", i.config.Disruption.TargetNodeName)
-		}
-
-		if i.config.DNS.DNSServer != "" {
-			args = append(args, "--dns", i.config.DNS.DNSServer)
-		}
-
-		if i.config.DNS.KubeDNS != "" {
-			args = append(args, "--kube-dns", i.config.DNS.KubeDNS)
-		}
-
-		cmd := i.config.CmdFactory.NewCmd(context.Background(), "/usr/bin/python3", args)
-
-		bgCmd := command.NewBackgroundCmd(cmd, i.config.Log, i.config.ProcessManager)
-		if err := bgCmd.Start(); err != nil {
-			launchDNSServerErr = fmt.Errorf("unable to run resolver: %w", err)
 			return
 		}
 	})
@@ -143,93 +250,138 @@ func (i *DNSDisruptionInjector) Inject() error {
 		return launchDNSServerErr
 	}
 
-	// enter target network namespace
+	i.config.Log.Infow("entering target network namespace to configure DNS disruption",
+		tags.DNSPortKey, dnsPort,
+		tags.UDPPortKey, udpPort,
+		tags.TCPPortKey, tcpPort,
+		tags.ProtocolKey, protocol,
+	)
+
+	// Enter target container's network namespace
 	if err := i.config.Netns.Enter(); err != nil {
-		return fmt.Errorf("unable to enter the given container network namespace: %w", err)
+		return fmt.Errorf("unable to enter the target container network namespace: %w", err)
 	}
 
-	// Set up iptables rules to redirect dns requests to the injector pod
-	// which holds the dns proxy process
-	if err := i.config.IPTables.RedirectTo("udp", "53", podIP); err != nil {
-		return fmt.Errorf("unable to create new iptables rule: %w", err)
-	}
+	// Configure IPTables to intercept DNS traffic based on protocol
+	// Setup IPTables for UDP if needed
+	if protocol == "udp" || protocol == "both" {
+		if err := i.setupIPTablesForProtocol("udp", dnsPort, udpPort, chaosPodIP); err != nil {
+			i.stopResponder()
+			_ = i.config.Netns.Exit()
 
-	if i.config.Disruption.Level == chaostypes.DisruptionLevelPod {
-		if i.config.Disruption.OnInit {
-			// Redirect all dns related traffic in the pod to CHAOS-DNS
-			if err := i.config.IPTables.Intercept("udp", "53", "", "", ""); err != nil {
-				return fmt.Errorf("unable to create new iptables rule: %w", err)
-			}
-		} else {
-			cgroupPath := ""
-			classID := ""
-
-			if i.config.Cgroup.IsCgroupV2() { // Filter packets on cgroup path for cgroup v2
-				cgroupPath = i.config.Cgroup.RelativePath("")
-			} else { // Filter packets on net_cls classid for cgroup v1
-				classID = chaostypes.InjectorCgroupClassID
-
-				// Apply the classid through net_cls to all packets created by the container
-				if err := i.config.Cgroup.Write("net_cls", "net_cls.classid", classID); err != nil {
-					return fmt.Errorf("unable to write net_cls classid: %w", err)
-				}
-			}
-
-			// Redirect packets based on their cgroup or classid depending on cgroup version to CHAOS-DNS
-			if err := i.config.IPTables.Intercept("udp", "53", cgroupPath, classID, podIP); err != nil {
-				return fmt.Errorf("unable to create new iptables rule: %w", err)
-			}
+			return err
 		}
 	}
 
-	if i.config.Disruption.Level == chaostypes.DisruptionLevelNode {
-		// Re-route all pods under node except for injector pod itself
-		if err := i.config.IPTables.Intercept("udp", "53", "", "", podIP); err != nil {
-			return fmt.Errorf("unable to create new iptables rule: %w", err)
+	// Setup IPTables for TCP if needed
+	if protocol == "tcp" || protocol == "both" {
+		if err := i.setupIPTablesForProtocol("tcp", dnsPort, tcpPort, chaosPodIP); err != nil {
+			i.stopResponder()
+			_ = i.config.Netns.Exit()
+
+			return err
 		}
 	}
 
-	// exit target network namespace
+	// Exit target container's network namespace
 	if err := i.config.Netns.Exit(); err != nil {
-		return fmt.Errorf("unable to exit the given container network namespace: %w", err)
+		i.stopResponder()
+
+		return fmt.Errorf("unable to exit the target container network namespace: %w", err)
+	}
+
+	i.config.Log.Infow("DNS disruption injected successfully",
+		tags.DNSRecordCountKey, len(i.spec.Records),
+	)
+
+	// DNS responder is running in background goroutines
+	// Return now so the pod can become ready
+	// The responder will keep running until Clean() is called
+	return nil
+}
+
+// setupIPTablesForProtocol configures IPTables rules for a specific protocol (udp or tcp)
+// IMPORTANT: RedirectTo must be called before Intercept to create the CHAOS-DNS chain first
+func (i *dnsDisruptionInjector) setupIPTablesForProtocol(proto string, dnsPort, responderPort int, chaosPodIP string) error {
+	// Redirect to DNS responder (creates CHAOS-DNS chain)
+	if err := i.config.IPTables.RedirectTo(proto, fmt.Sprintf("%d", dnsPort), fmt.Sprintf("%s:%d", chaosPodIP, responderPort)); err != nil {
+		return fmt.Errorf("failed to configure IPTables for %s redirection: %w", proto, err)
+	}
+
+	// Intercept ALL DNS traffic in this namespace (no cgroup filtering since we're in target namespace)
+	if err := i.config.IPTables.Intercept(proto, fmt.Sprintf("%d", dnsPort), "", "", ""); err != nil {
+		return fmt.Errorf("failed to configure IPTables for %s interception: %w", proto, err)
 	}
 
 	return nil
 }
 
-func (i *DNSDisruptionInjector) UpdateConfig(config Config) {
+// stopResponder stops the DNS responder and logs any errors
+func (i *dnsDisruptionInjector) stopResponder() {
+	if i.responder != nil {
+		if err := i.responder.Stop(); err != nil {
+			i.config.Log.Errorw("error stopping DNS responder", tags.ErrorKey, err)
+		}
+	}
+}
+
+func (i *dnsDisruptionInjector) UpdateConfig(config Config) {
 	i.config.Config = config
 }
 
-// Clean removes the injected disruption from the given container
-func (i *DNSDisruptionInjector) Clean() error {
-	// enter target network namespace
+// Clean removes IPTables rules and stops the DNS responder
+func (i *dnsDisruptionInjector) Clean() error {
+	// Dry run mode - nothing to clean
+	if i.config.Disruption.DryRun {
+		i.config.Log.Infow("cleaning up DNS disruption in dry run mode (no-op)")
+		return nil
+	}
+
+	i.config.Log.Infow("cleaning up DNS disruption")
+
+	var errs []error
+
+	// Stop DNS responder
+	if i.responder != nil {
+		i.config.Log.Infow("stopping DNS responder")
+
+		if err := i.responder.Stop(); err != nil {
+			i.config.Log.Errorw("error stopping DNS responder during cleanup", tags.ErrorKey, err)
+			errs = append(errs, fmt.Errorf("failed to stop DNS responder: %w", err))
+		} else {
+			ResetDNSServerOnce()
+		}
+
+		i.responder = nil
+	}
+
+	// Enter target container's network namespace to clear IPTables rules
+	i.config.Log.Infow("entering target network namespace to clear IPTables rules")
+
 	if err := i.config.Netns.Enter(); err != nil {
-		return fmt.Errorf("unable to enter the given container network namespace: %w", err)
-	}
+		i.config.Log.Errorw("error entering network namespace during cleanup", tags.ErrorKey, err)
+		errs = append(errs, fmt.Errorf("failed to enter network namespace: %w", err))
+	} else {
+		// Clear IPTables rules
+		i.config.Log.Infow("clearing IPTables rules")
 
-	// clean injected iptables
-	if err := i.config.IPTables.Clear(); err != nil {
-		return fmt.Errorf("unable to clean iptables rules and chain: %w", err)
-	}
+		if err := i.config.IPTables.Clear(); err != nil {
+			i.config.Log.Errorw("error clearing IPTables rules", tags.ErrorKey, err)
+			errs = append(errs, fmt.Errorf("failed to clear IPTables rules: %w", err))
+		}
 
-	// exit target network namespace
-	if err := i.config.Netns.Exit(); err != nil {
-		return fmt.Errorf("unable to exit the given container network namespace: %w", err)
-	}
-
-	// Remove the net_cls classid for cgroup v1
-	if !i.config.Cgroup.IsCgroupV2() {
-		if err := i.config.Cgroup.Write("net_cls", "net_cls.classid", "0"); err != nil {
-			if os.IsNotExist(err) {
-				i.config.Log.Warnw("unable to find target container's net_cls.classid file, we will assume we cannot find the cgroup path because it is gone", "targetContainerID", i.config.TargetContainer.ID(), "error", err)
-				return nil
-			}
-
-			return fmt.Errorf("error cleaning net_cls classid: %w", err)
+		// Exit target container's network namespace
+		if err := i.config.Netns.Exit(); err != nil {
+			i.config.Log.Errorw("error exiting network namespace during cleanup", tags.ErrorKey, err)
+			errs = append(errs, fmt.Errorf("failed to exit network namespace: %w", err))
 		}
 	}
 
-	// There is nothing we need to do to shut down the resolver beyond letting the pod terminate
+	if len(errs) > 0 {
+		return fmt.Errorf("errors during DNS disruption cleanup: %v", errs)
+	}
+
+	i.config.Log.Infow("DNS disruption cleaned up successfully")
+
 	return nil
 }
