@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/stretchr/testify/mock"
@@ -67,6 +68,9 @@ var _ = Describe("Chaos Pod Service", func() {
 	)
 
 	BeforeEach(func() {
+		// Keep pod-spec assertions independent of the developer's StatsD configuration.
+		GinkgoT().Setenv("STATSD_URL", "")
+
 		// Arrange
 		k8sClientMock = mocks.NewK8SClientMock(GinkgoT())
 		targetSelectorMock = targetselector.NewTargetSelectorMock(GinkgoT())
@@ -891,6 +895,27 @@ var _ = Describe("Chaos Pod Service", func() {
 			}
 			EmptyInjectorLabels = map[string]string{}
 		})
+
+		DescribeTable("StatsD endpoint propagation", func(endpoint string, configured bool) {
+			GinkgoT().Setenv("STATSD_URL", endpoint)
+			if !configured {
+				Expect(os.Unsetenv("STATSD_URL")).To(Succeed())
+			}
+
+			chaosPod := chaosPodService.GenerateChaosPodOfDisruption(disruption, DefaultTargetName, DefaultTargetNodeName, nil, chaostypes.DisruptionKindNames[0])
+			injectorEnv := chaosPod.Spec.Containers[0].Env
+
+			if endpoint != "" {
+				Expect(injectorEnv).To(ContainElement(corev1.EnvVar{Name: "STATSD_URL", Value: endpoint}))
+			} else {
+				Expect(injectorEnv).NotTo(ContainElement(HaveField("Name", "STATSD_URL")))
+			}
+		},
+			Entry("passes the configured endpoint to the injector", "169.254.1.1:8125", true),
+			Entry("preserves a custom endpoint", "statsd.example.test:9125", true),
+			Entry("does not override SDK autodetection with an empty endpoint", "", true),
+			Entry("leaves the injector environment unchanged when unset", "", false),
+		)
 
 		DescribeTable("success cases", func(expectedPodBuilder *builderstest.ChaosPodBuilder, expectedLabels map[string]string) {
 			// Arrange

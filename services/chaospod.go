@@ -8,6 +8,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"os"
 	"reflect"
 	"strings"
 	"time"
@@ -653,6 +654,15 @@ func (m *chaosPodService) generateChaosPodSpec(targetNodeName string, terminatio
 				},
 			},
 		},
+	}
+
+	// Injector pods do not inherit the controller's environment. Pass its explicit
+	// StatsD endpoint so their Datadog metrics sink can initialize as well.
+	if endpoint := os.Getenv("STATSD_URL"); endpoint != "" {
+		podSpec.Containers[0].Env = append(podSpec.Containers[0].Env, corev1.EnvVar{
+			Name:  "STATSD_URL",
+			Value: endpoint,
+		})
 	}
 
 	if m.config.ImagePullSecrets != "" {

@@ -4,6 +4,24 @@
 
 Here's the list of metrics sent by the controller and the injector.
 
+### StatsD endpoint configuration
+
+With the `datadog` metrics sink, set `STATSD_URL` on the controller to a StatsD
+endpoint reachable from both controller and injector pods (for example,
+`169.254.1.1:8125` on Zendesk Kubernetes clusters). A non-empty value is copied
+into each newly generated injector pod; existing pods are unchanged.
+
+Use a node-local endpoint available on every target node, or a shared service
+address. A controller-local loopback address is not shared with injector pods.
+Unix socket endpoints require the socket to also be mounted into injector pods;
+copying `STATSD_URL` does not add volume mounts.
+
+When `STATSD_URL` is empty or unset, no override is added to injector pods and
+SDK autodetection is unchanged. If no endpoint can be resolved, the injector
+logs `error while creating metric sink, switching to noop sink` and continues
+injecting without custom metrics. Kubernetes metrics and injection logs remain
+available, but do not replace the injector outcome metrics below.
+
 ### Controller
 
 * `chaos.controller.restart` increments when the controller is restarted
